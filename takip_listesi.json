@@ -1,0 +1,40 @@
+[
+  {
+    "isim": "Zehir Kılıcı +9",
+    "max_won": 50,
+    "efsunlar": []
+  },
+  {
+    "isim": "Kin Kılıcı +9",
+    "max_won": 30,
+    "efsunlar": []
+  },
+  {
+    "isim": "Boynuzlu Kask +9",
+    "max_won": 40.0,
+    "efsunlar": [
+      "15 ateş"
+    ]
+  },
+  {
+    "isim": "Kale Kask +9",
+    "max_won": 40.0,
+    "efsunlar": [
+      "15 ateş"
+    ]
+  },
+  {
+    "isim": "Kara Büyü Zırh +9",
+    "max_won": 40.0,
+    "efsunlar": [
+      "15 ateş"
+    ]
+  },
+  {
+    "isim": "Hortlak Zırh +9",
+    "max_won": 40.0,
+    "efsunlar": [
+      "15 ateş"
+    ]
+  }
+]
