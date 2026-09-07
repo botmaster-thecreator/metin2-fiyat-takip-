@@ -3,6 +3,7 @@ import os
 import re
 import time
 import threading
+import urllib.parse
 import requests
 from flask import Flask
 
@@ -10,11 +11,6 @@ SERVER_NAME = "Charon"
 
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "").strip()
 CHAT_ID = os.environ.get("CHAT_ID", "").strip()
-
-raw_api = os.environ.get("API_URL", "https://metin2alerts.com/api/market/search").strip()
-API_URL = re.sub(r'[^\x20-\x7E]', '', raw_api).rstrip("/")
-
-GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "").strip()
 SCRAPER_API_KEY = os.environ.get("SCRAPER_API_KEY", "").strip()
 
 DB_FILE = "bildirilenler.json"
@@ -71,7 +67,7 @@ def send_telegram(text):
         print(f"Telegram Gönderim Hatası: {e}", flush=True)
 
 # -------------------------------------------------------------
-# ⚡ HIZLI AYRIŞTIRICI & GEMINI
+# ⚡ HIZLI KOMUT AYRIŞTIRICI
 # -------------------------------------------------------------
 def hizli_ayristir(metin):
     kalip = r"^(?P<isim>.+?)\s+(?P<won>\d+(?:[\.,]\d+)?)\s*won(?:\s+(?P<efsun>.*))?$"
@@ -172,7 +168,7 @@ def telegram_dinleyici_dongusu():
                             degisiklik_var = True
                             send_telegram("✅ <b>Listeye eklendi:</b>\n\n" + "\n".join(eklenen_isimler))
                         else:
-                            send_telegram("⚠️ Format: <code>Eşya Adı Fiyat won</code>\nÖrn: <code>Kutsama Kağıdı 999 won</code>")
+                            send_telegram("⚠️ Komut formatı: <code>Eşya Adı Fiyat won</code>\nÖrn: <code>Kutsama Kağıdı 999 won</code>")
 
                     state["last_update_id"] = last_id
                     save_json(STATE_FILE, state)
@@ -184,39 +180,61 @@ def telegram_dinleyici_dongusu():
             time.sleep(3)
 
 # -------------------------------------------------------------
-# 🔍 METIN2 PAZAR TARAYICISI (LOG AYRINTILI)
+# 🔍 METIN2 PAZAR VERİ ÇEKİCİ (NEXT.JS & HTML PARSER)
 # -------------------------------------------------------------
-def fetch_data(urun_adi):
+def fetch_pazar_verisi(urun_adi):
     arama_kelimesi = urun_adi.split("+")[0].strip() if "+" in urun_adi else urun_adi
     if "(" in arama_kelimesi:
         arama_kelimesi = arama_kelimesi.split("(")[0].strip()
 
-    target_url = f"{API_URL}?server={SERVER_NAME}&query={arama_kelimesi}&search={arama_kelimesi}"
+    encoded_query = urllib.parse.quote(arama_kelimesi)
+    target_url = f"https://metin2alerts.com/?server={SERVER_NAME}&search={encoded_query}"
 
-    if SCRAPER_API_KEY:
-        scraper_url = "http://api.scraperapi.com"
-        params = {"api_key": SCRAPER_API_KEY, "url": target_url}
-        try:
-            r = requests.get(scraper_url, params=params, timeout=35)
-            print(f"🔍 [{urun_adi}] ScraperAPI Yanıt Kodu: {r.status_code}", flush=True)
-            if r.status_code == 200:
-                veri = r.json()
-                # Gelen ham verinin yapısını terminale yazdırıyoruz
-                print(f"📦 [{urun_adi}] Dönen Ham Veri Özeti: {str(veri)[:250]}", flush=True)
-                return veri
-            else:
-                print(f"⚠️ ScraperAPI Hatası: {r.text[:150]}", flush=True)
-        except Exception as e:
-            print(f"⚠️ İstek Hatası: {e}", flush=True)
-        return None
+    if not SCRAPER_API_KEY:
+        print("⚠️ SCRAPER_API_KEY bulunamadı.", flush=True)
+        return []
+
+    scraper_url = "http://api.scraperapi.com"
+    params = {"api_key": SCRAPER_API_KEY, "url": target_url}
 
     try:
-        r = requests.get(target_url, timeout=15)
-        if r.status_code == 200:
-            return r.json()
-    except Exception:
-        pass
-    return None
+        r = requests.get(scraper_url, params=params, timeout=40)
+        if r.status_code != 200:
+            print(f"⚠️ [{urun_adi}] ScraperAPI HTTP {r.status_code}", flush=True)
+            return []
+
+        html = r.text
+
+        # 1. Yöntem: Next.js içindeki gömülü JSON verisini çekme
+        next_data_match = re.search(r'<script id="__NEXT_DATA__" type="application/json">({.*?})</script>', html, re.DOTALL)
+        if next_data_match:
+            try:
+                data = json.loads(next_data_match.group(1))
+                page_props = data.get("props", {}).get("pageProps", {})
+                for key in ["items", "marketItems", "data", "listings", "initialState"]:
+                    if key in page_props and isinstance(page_props[key], list):
+                        print(f"📦 [{urun_adi}] __NEXT_DATA__ üzerinden {len(page_props[key])} ilan bulundu.", flush=True)
+                        return page_props[key]
+            except Exception:
+                pass
+
+        # 2. Yöntem: Sayfa metninden JSON dizi bloklarını yakalama
+        json_blocks = re.findall(r'\[\s*\{.*?"item_name".*?\}\s*\]|\[\s*\{.*?"name".*?\}\s*\]', html, re.DOTALL)
+        for block in json_blocks:
+            try:
+                parsed = json.loads(block)
+                if isinstance(parsed, list) and len(parsed) > 0:
+                    print(f"📦 [{urun_adi}] JSON bloğundan {len(parsed)} ilan yakalandı.", flush=True)
+                    return parsed
+            except Exception:
+                continue
+
+        print(f"ℹ️ [{urun_adi}] Sayfa yüklendi fakat ilan listesi tespit edilemedi.", flush=True)
+        return []
+
+    except Exception as e:
+        print(f"⚠️ [{urun_adi}] Veri Çekme Hatası: {e}", flush=True)
+        return []
 
 def pazar_tarama_dongusu():
     print(f"[{SERVER_NAME}] Pazar tarama aktif.", flush=True)
@@ -228,34 +246,25 @@ def pazar_tarama_dongusu():
 
             zaman_str = time.strftime('%H:%M:%S')
             print(f"\n--- [{zaman_str}] Pazar Taraması ({len(takip_listesi)} Eşya) ---", flush=True)
+            yeni_bildirim_sayisi = 0
 
             for hedef in takip_listesi:
                 aranan_tam_ad = hedef["isim"].lower()
                 limit_won = hedef["max_won"]
 
-                data = fetch_data(hedef["isim"])
-                if not data:
-                    print(f"❌ [{hedef['isim']}] Veri boş döndü.", flush=True)
-                    continue
-
-                items = data if isinstance(data, list) else (data.get("items") or data.get("data") or data.get("results") or [])
-                print(f"📊 [{hedef['isim']}] Ayrıştırılan İlan Sayısı: {len(items)}", flush=True)
+                items = fetch_pazar_verisi(hedef["isim"])
 
                 for item in items:
                     name = item.get("name", item.get("item_name", ""))
-                    # Fiyat hem Won hem Yang cinsinden gelebilir
                     price_raw = item.get("price_won") or item.get("won") or item.get("price", 0)
                     try:
                         price = float(price_raw)
-                        # Eğer fiyat Yang cinsindense (örn: 10.000.000) Won'a çevir
                         if price > 10000:
                             price = price / 100000000.0
                     except Exception:
                         price = 9999
 
                     item_id = str(item.get("id") or item.get("_id") or f"{name}_{price}")
-
-                    print(f"🔎 İncelenen İlan: {name} - Fiyat: {price} Won (Limit: {limit_won})", flush=True)
 
                     if aranan_tam_ad not in name.lower() and name.lower() not in aranan_tam_ad:
                         continue
@@ -280,15 +289,18 @@ def pazar_tarama_dongusu():
                     )
                     send_telegram(mesaj)
                     seen_ids.add(item_id)
+                    yeni_bildirim_sayisi += 1
                     time.sleep(1)
+
+                time.sleep(2)
 
             with lock:
                 save_json(DB_FILE, list(seen_ids))
 
-            print("✅ Tarama döngüsü tamamlandı.\n", flush=True)
+            print(f"✅ Tarama bitti. {yeni_bildirim_sayisi} yeni bildirim atıldı.\n", flush=True)
 
         except Exception as e:
-            print(f"Pazar Tarama Döngü Hatası: {e}", flush=True)
+            print(f"Pazar Tarama Hatası: {e}", flush=True)
 
         time.sleep(300)
 
