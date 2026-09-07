@@ -24,7 +24,7 @@ STATE_FILE = "bot_state.json"
 lock = threading.Lock()
 
 # -------------------------------------------------------------
-# 🌐 FLASK WEB SUNUCUSU (Render'ı Canlı Tutma)
+# 🌐 FLASK WEB SUNUCUSU
 # -------------------------------------------------------------
 app = Flask(__name__)
 
@@ -95,35 +95,6 @@ def hizli_ayristir(metin):
         "esyalar": [{"isim": ad.title() if "+" not in ad else ad, "max_won": fiyat, "efsunlar": efsunlar}]
     }
 
-def gemini_ile_cozumle(kullanici_metni):
-    if not GEMINI_API_KEY:
-        return None
-
-    prompt = f"""
-    Sen bir Metin2 pazar asistanısın. Kullanıcının Türkçe yazdığı mesajı analiz et ve niyetini JSON olarak çıkar.
-    Niyetler: "ekle", "sil", "son_sil", "temizle", "liste"
-    Kural: Artı basılmayan eşyalara (kutsama vb.) asla +9 ekleme.
-    Çıktı sadece geçerli bir JSON nesnesi olsun:
-    {{"aksiyon": "ekle", "esyalar": [{{"isim": "Dolunay Kılıcı +9", "max_won": 50.0, "efsunlar": []}}]}}
-    Kullanıcı Metni: "{kullanici_metni}"
-    """
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={GEMINI_API_KEY}"
-    payload = {
-        "contents": [{"parts": [{"text": prompt}]}],
-        "generationConfig": {"response_mime_type": "application/json"}
-    }
-    try:
-        res = requests.post(url, json=payload, timeout=20)
-        if res.status_code != 200:
-            return None
-        data = res.json()
-        raw_json = data["candidates"][0]["content"]["parts"][0]["text"].strip()
-        raw_json = re.sub(r"^```json\s*", "", raw_json)
-        raw_json = re.sub(r"\s*```$", "", raw_json)
-        return json.loads(raw_json)
-    except Exception:
-        return None
-
 def liste_mesaji_gonder(takip_listesi):
     if not takip_listesi:
         send_telegram("📋 Takip listeniz şu an boş.\n\nÖrnek ekleme: <code>Kutsama Kağıdı 999 won</code> veya <code>Dolunay Kılıcı +9 50 won</code>")
@@ -168,9 +139,7 @@ def telegram_dinleyici_dongusu():
 
                 with lock:
                     takip_listesi = load_json(LISTE_FILE, [])
-                    son_eklenenler = state.get("son_eklenenler", [])
                     degisiklik_var = False
-
                     temiz_komut = text.lower()
 
                     if temiz_komut in ["/liste", "/list", "/start", "liste", "list"]:
@@ -178,7 +147,6 @@ def telegram_dinleyici_dongusu():
 
                     elif temiz_komut in ["/temizle", "temizle", "sıfırla"]:
                         takip_listesi = []
-                        son_eklenenler = []
                         degisiklik_var = True
                         send_telegram("🧹 <b>Takip listeniz temizlendi!</b>")
 
@@ -194,30 +162,17 @@ def telegram_dinleyici_dongusu():
 
                     else:
                         analiz = hizli_ayristir(text)
-                        if not analiz:
-                            send_telegram("🧠 İsteğin analiz ediliyor...")
-                            analiz = gemini_ile_cozumle(text)
-
-                        if not analiz:
-                            send_telegram("⚠️ İsteğin anlaşılamadı. Örn: <code>Kutsama Kağıdı 999 won</code>")
+                        if analiz and analiz.get("aksiyon") == "ekle":
+                            yeni_esyalar = analiz.get("esyalar", [])
+                            eklenen_isimler = []
+                            for y_item in yeni_esyalar:
+                                takip_listesi = [item for item in takip_listesi if item["isim"].lower() != y_item["isim"].lower()]
+                                takip_listesi.append(y_item)
+                                eklenen_isimler.append(f"• <b>{y_item['isim']}</b> (Tavan: {y_item['max_won']} Won)")
+                            degisiklik_var = True
+                            send_telegram("✅ <b>Listeye eklendi:</b>\n\n" + "\n".join(eklenen_isimler))
                         else:
-                            aksiyon = analiz.get("aksiyon")
-                            if aksiyon == "temizle":
-                                takip_listesi = []
-                                degisiklik_var = True
-                                send_telegram("🧹 <b>Takip listeniz temizlendi!</b>")
-                            elif aksiyon == "liste":
-                                liste_mesaji_gonder(takip_listesi)
-                            elif aksiyon == "ekle":
-                                yeni_esyalar = analiz.get("esyalar", [])
-                                if yeni_esyalar:
-                                    eklenen_isimler = []
-                                    for y_item in yeni_esyalar:
-                                        takip_listesi = [item for item in takip_listesi if item["isim"].lower() != y_item["isim"].lower()]
-                                        takip_listesi.append(y_item)
-                                        eklenen_isimler.append(f"• <b>{y_item['isim']}</b> (Tavan: {y_item['max_won']} Won)")
-                                    degisiklik_var = True
-                                    send_telegram("✅ <b>Listeye eklendi:</b>\n\n" + "\n".join(eklenen_isimler))
+                            send_telegram("⚠️ Format: <code>Eşya Adı Fiyat won</code>\nÖrn: <code>Kutsama Kağıdı 999 won</code>")
 
                     state["last_update_id"] = last_id
                     save_json(STATE_FILE, state)
@@ -229,7 +184,7 @@ def telegram_dinleyici_dongusu():
             time.sleep(3)
 
 # -------------------------------------------------------------
-# 🔍 METIN2 PAZAR TARAYICISI (SCRAPERAPI TÜNELİ)
+# 🔍 METIN2 PAZAR TARAYICISI (LOG AYRINTILI)
 # -------------------------------------------------------------
 def fetch_data(urun_adi):
     arama_kelimesi = urun_adi.split("+")[0].strip() if "+" in urun_adi else urun_adi
@@ -238,25 +193,23 @@ def fetch_data(urun_adi):
 
     target_url = f"{API_URL}?server={SERVER_NAME}&query={arama_kelimesi}&search={arama_kelimesi}"
 
-    # ScraperAPI anahtarı varsa Cloudflare korumasını delerek istek atar
     if SCRAPER_API_KEY:
         scraper_url = "http://api.scraperapi.com"
-        params = {
-            "api_key": SCRAPER_API_KEY,
-            "url": target_url,
-            "keep_headers": "true"
-        }
+        params = {"api_key": SCRAPER_API_KEY, "url": target_url}
         try:
             r = requests.get(scraper_url, params=params, timeout=35)
+            print(f"🔍 [{urun_adi}] ScraperAPI Yanıt Kodu: {r.status_code}", flush=True)
             if r.status_code == 200:
-                return r.json()
+                veri = r.json()
+                # Gelen ham verinin yapısını terminale yazdırıyoruz
+                print(f"📦 [{urun_adi}] Dönen Ham Veri Özeti: {str(veri)[:250]}", flush=True)
+                return veri
             else:
-                print(f"⚠️ [{urun_adi}] ScraperAPI HTTP {r.status_code}: {r.text[:100]}", flush=True)
+                print(f"⚠️ ScraperAPI Hatası: {r.text[:150]}", flush=True)
         except Exception as e:
-            print(f"⚠️ [{urun_adi}] ScraperAPI Hatası: {e}", flush=True)
+            print(f"⚠️ İstek Hatası: {e}", flush=True)
         return None
 
-    # ScraperAPI anahtarı henüz eklenmemişse standart istek atar
     try:
         r = requests.get(target_url, timeout=15)
         if r.status_code == 200:
@@ -264,14 +217,6 @@ def fetch_data(urun_adi):
     except Exception:
         pass
     return None
-
-def efsun_uyuyor_mu(istenen_sart, tum_efsunlar):
-    aranan_kelimeler = istenen_sart.split()
-    for satır in tum_efsunlar:
-        satır_lower = str(satır).lower()
-        if all(kelime in satır_lower for kelime in aranan_kelimeler):
-            return True
-    return False
 
 def pazar_tarama_dongusu():
     print(f"[{SERVER_NAME}] Pazar tarama aktif.", flush=True)
@@ -283,53 +228,46 @@ def pazar_tarama_dongusu():
 
             zaman_str = time.strftime('%H:%M:%S')
             print(f"\n--- [{zaman_str}] Pazar Taraması ({len(takip_listesi)} Eşya) ---", flush=True)
-            yeni_bildirim_sayisi = 0
 
             for hedef in takip_listesi:
                 aranan_tam_ad = hedef["isim"].lower()
                 limit_won = hedef["max_won"]
-                istenen_efsunlar = hedef.get("efsunlar", [])
 
                 data = fetch_data(hedef["isim"])
-                if data is None:
-                    time.sleep(2)
+                if not data:
+                    print(f"❌ [{hedef['isim']}] Veri boş döndü.", flush=True)
                     continue
 
                 items = data if isinstance(data, list) else (data.get("items") or data.get("data") or data.get("results") or [])
-
-                if len(items) == 0:
-                    print(f"ℹ️ [{hedef['isim']}] Pazarda aktif ilan yok (0 adet).", flush=True)
-                    time.sleep(2)
-                    continue
-
-                kriter_uydu_sayisi = 0
+                print(f"📊 [{hedef['isim']}] Ayrıştırılan İlan Sayısı: {len(items)}", flush=True)
 
                 for item in items:
-                    item_id = str(item.get("id") or item.get("_id") or item.get("hash") or f"{item.get('name')}_{item.get('price_won')}")
                     name = item.get("name", item.get("item_name", ""))
-                    price = float(item.get("price_won", item.get("price", 9999)))
-                    bonuses = item.get("bonuses", item.get("efsunlar", []))
-                    seller = item.get("seller", item.get("player_name", "Bilinmiyor"))
+                    # Fiyat hem Won hem Yang cinsinden gelebilir
+                    price_raw = item.get("price_won") or item.get("won") or item.get("price", 0)
+                    try:
+                        price = float(price_raw)
+                        # Eğer fiyat Yang cinsindense (örn: 10.000.000) Won'a çevir
+                        if price > 10000:
+                            price = price / 100000000.0
+                    except Exception:
+                        price = 9999
 
-                    if aranan_tam_ad not in name.lower():
+                    item_id = str(item.get("id") or item.get("_id") or f"{name}_{price}")
+
+                    print(f"🔎 İncelenen İlan: {name} - Fiyat: {price} Won (Limit: {limit_won})", flush=True)
+
+                    if aranan_tam_ad not in name.lower() and name.lower() not in aranan_tam_ad:
                         continue
                     if price > limit_won:
                         continue
-
-                    if istenen_efsunlar:
-                        uygun = True
-                        for sart in istenen_efsunlar:
-                            if not efsun_uyuyor_mu(sart, bonuses):
-                                uygun = False
-                                break
-                        if not uygun:
-                            continue
-
-                    kriter_uydu_sayisi += 1
                     if item_id in seen_ids:
                         continue
 
+                    seller = item.get("seller", item.get("player_name", "Bilinmiyor"))
+                    bonuses = item.get("bonuses", item.get("efsunlar", []))
                     efsun_yazisi = "\n".join([f"• {b}" for b in bonuses]) if bonuses else "Standart"
+
                     mesaj = (
                         f"🚨 <b>METIN2 FIRSAT İLANI!</b>\n"
                         f"━━━━━━━━━━━━━━━━━━\n"
@@ -342,30 +280,19 @@ def pazar_tarama_dongusu():
                     )
                     send_telegram(mesaj)
                     seen_ids.add(item_id)
-                    yeni_bildirim_sayisi += 1
                     time.sleep(1)
-
-                print(f"📊 [{hedef['isim']}] Pazardaki: {len(items)} | Uygun: {kriter_uydu_sayisi}", flush=True)
-                time.sleep(2)
 
             with lock:
                 save_json(DB_FILE, list(seen_ids))
 
-            print(f"✅ Tarama bitti. {yeni_bildirim_sayisi} yeni bildirim atıldı.\n", flush=True)
+            print("✅ Tarama döngüsü tamamlandı.\n", flush=True)
 
         except Exception as e:
-            print(f"Pazar Tarama Hatası: {e}", flush=True)
+            print(f"Pazar Tarama Döngü Hatası: {e}", flush=True)
 
         time.sleep(300)
 
-# -------------------------------------------------------------
-# 🚀 BAŞLATICI
-# -------------------------------------------------------------
 if __name__ == "__main__":
-    t_tele = threading.Thread(target=telegram_dinleyici_dongusu, daemon=True)
-    t_tele.start()
-
-    t_pazar = threading.Thread(target=pazar_tarama_dongusu, daemon=True)
-    t_pazar.start()
-
+    threading.Thread(target=telegram_dinleyici_dongusu, daemon=True).start()
+    threading.Thread(target=pazar_tarama_dongusu, daemon=True).start()
     run_flask()
