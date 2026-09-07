@@ -20,7 +20,7 @@ STATE_FILE = "bot_state.json"
 lock = threading.Lock()
 
 # -------------------------------------------------------------
-# 🌐 FLASK WEB SUNUCUSU (Render'ı Canlı Tutma)
+# 🌐 FLASK WEB SUNUCUSU (Render Canlı Tutma)
 # -------------------------------------------------------------
 app = Flask(__name__)
 
@@ -180,7 +180,7 @@ def telegram_dinleyici_dongusu():
             time.sleep(3)
 
 # -------------------------------------------------------------
-# 🔍 METIN2 PAZAR VERİ ÇEKİCİ (JS RENDER & TABLO BEKLEMELİ)
+# 🔍 METIN2 PAZAR VERİ ÇEKİCİ (DOĞRU MARKET ENDPOINT)
 # -------------------------------------------------------------
 def fetch_pazar_verisi(urun_adi):
     arama_kelimesi = urun_adi.split("+")[0].strip() if "+" in urun_adi else urun_adi
@@ -188,7 +188,8 @@ def fetch_pazar_verisi(urun_adi):
         arama_kelimesi = arama_kelimesi.split("(")[0].strip()
 
     encoded_query = urllib.parse.quote(arama_kelimesi)
-    target_url = f"https://metin2alerts.com/?server={SERVER_NAME}&search={encoded_query}"
+    # Doğrudan /market rotası
+    target_url = f"https://metin2alerts.com/market?server={SERVER_NAME}&search={encoded_query}"
 
     if not SCRAPER_API_KEY:
         print("⚠️ SCRAPER_API_KEY bulunamadı.", flush=True)
@@ -199,7 +200,7 @@ def fetch_pazar_verisi(urun_adi):
         "api_key": SCRAPER_API_KEY,
         "url": target_url,
         "render": "true",
-        "wait": "4000"
+        "wait": "3000"
     }
 
     try:
@@ -210,7 +211,7 @@ def fetch_pazar_verisi(urun_adi):
 
         html = r.text
 
-        # 1. Next.js JSON bloğu kontrolü
+        # 1. Next.js Pazar Verisi
         next_data_match = re.search(r'<script id="__NEXT_DATA__" type="application/json">(.*?)</script>', html, re.DOTALL)
         if next_data_match:
             try:
@@ -226,17 +227,17 @@ def fetch_pazar_verisi(urun_adi):
             except Exception:
                 pass
 
-        # 2. DOM / Tablo Satırı Ayrıştırma
+        # 2. Render edilmiş Tablo / Kart Ayrıştırma
         bulunan_ilanlar = []
-        ilan_bloklari = re.findall(r'(<(?:div|tr)[^>]*?(?:item|row|card|listing|pazar)[^>]*?>.*?</(?:div|tr)>)', html, re.DOTALL | re.IGNORECASE)
-        if not ilan_bloklari:
-            ilan_bloklari = re.findall(r'<tr[^>]*>(.*?)</tr>', html, re.DOTALL | re.IGNORECASE)
+        satirlar = re.findall(r'<tr[^>]*>(.*?)</tr>', html, re.DOTALL | re.IGNORECASE)
+        if not satirlar:
+            satirlar = re.findall(r'(<(?:div|li)[^>]*?(?:item|row|card|market)[^>]*?>.*?</(?:div|li)>)', html, re.DOTALL | re.IGNORECASE)
 
-        for blok in ilan_bloklari:
-            if "schema.org" in blok.lower():
+        for satir in satirlar:
+            if "schema.org" in satir.lower():
                 continue
-            metin = re.sub(r'<[^>]+>', ' ', blok).strip()
-            if arama_kelimesi.lower() in metin.lower() and "won" in metin.lower():
+            metin = re.sub(r'<[^>]+>', ' ', satir).strip()
+            if arama_kelimesi.lower() in metin.lower() and ("won" in metin.lower() or "yang" in metin.lower()):
                 won_eslesme = re.search(r'(\d+(?:[.,]\d+)?)\s*won', metin, re.IGNORECASE)
                 if won_eslesme:
                     fiyat = float(won_eslesme.group(1).replace(",", "."))
@@ -244,15 +245,15 @@ def fetch_pazar_verisi(urun_adi):
                         "name": urun_adi,
                         "price_won": fiyat,
                         "seller": "Pazar İlanı",
-                        "bonuses": [metin[:80]]
+                        "bonuses": []
                     })
 
         if bulunan_ilanlar:
-            print(f"📦 [{urun_adi}] {len(bulunan_ilanlar)} adet pazar ilanı yakalandı!", flush=True)
+            print(f"📦 [{urun_adi}] Market sayfasından {len(bulunan_ilanlar)} adet ilan yakalandı!", flush=True)
             return bulunan_ilanlar
 
         temiz_ozet = re.sub(r'<[^>]+>', ' ', html)[:200].strip()
-        print(f"ℹ️ [{urun_adi}] İlan bulunamadı. Sayfa metin özeti: {temiz_ozet}", flush=True)
+        print(f"ℹ️ [{urun_adi}] İlan bulunamadı. Sayfa özeti: {temiz_ozet}", flush=True)
         return []
 
     except Exception as e:
