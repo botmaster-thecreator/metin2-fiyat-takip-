@@ -93,7 +93,7 @@ def hizli_ayristir(metin):
 
 def liste_mesaji_gonder(takip_listesi):
     if not takip_listesi:
-        send_telegram("📋 Takip listeniz şu an boş.\n\nÖrnek ekleme: <code>Kutsama Kağıdı 999 won</code> veya <code>Dolunay Kılıcı +9 50 won</code>")
+        send_telegram("📋 Takip listeniz şu an boş.\n\nÖrnek: <code>Kutsama Kağıdı 999 won</code> veya <code>Dolunay Kılıcı +9 50 won</code>")
     else:
         metin = "📋 <b>Aktif Takip Listesi (Charon):</b>\n\n"
         for itm in takip_listesi:
@@ -180,7 +180,7 @@ def telegram_dinleyici_dongusu():
             time.sleep(3)
 
 # -------------------------------------------------------------
-# 🔍 METIN2 PAZAR VERİ ÇEKİCİ
+# 🔍 METIN2 PAZAR VERİ ÇEKİCİ (JS RENDER & DEEP EXTRACTOR)
 # -------------------------------------------------------------
 def fetch_pazar_verisi(urun_adi):
     arama_kelimesi = urun_adi.split("+")[0].strip() if "+" in urun_adi else urun_adi
@@ -191,43 +191,68 @@ def fetch_pazar_verisi(urun_adi):
     target_url = f"https://metin2alerts.com/?server={SERVER_NAME}&search={encoded_query}"
 
     if not SCRAPER_API_KEY:
+        print("⚠️ SCRAPER_API_KEY bulunamadı.", flush=True)
         return []
 
     scraper_url = "http://api.scraperapi.com"
-    params = {"api_key": SCRAPER_API_KEY, "url": target_url}
+    params = {
+        "api_key": SCRAPER_API_KEY,
+        "url": target_url,
+        "render": "true"  # Tarayıcı motorunu çalıştırır, JS ile ilanların dolmasını sağlar
+    }
 
     try:
-        r = requests.get(scraper_url, params=params, timeout=40)
+        r = requests.get(scraper_url, params=params, timeout=60)
         if r.status_code != 200:
+            print(f"⚠️ [{urun_adi}] ScraperAPI HTTP {r.status_code}", flush=True)
             return []
 
         html = r.text
 
-        # 1. Next.js verisi
-        next_data_match = re.search(r'<script id="__NEXT_DATA__" type="application/json">({.*?})</script>', html, re.DOTALL)
+        # 1. Next.js Veri Ayrıştırma
+        next_data_match = re.search(r'<script id="__NEXT_DATA__" type="application/json">(.*?)</script>', html, re.DOTALL)
         if next_data_match:
             try:
                 data = json.loads(next_data_match.group(1))
                 page_props = data.get("props", {}).get("pageProps", {})
-                for key in ["items", "marketItems", "data", "listings", "initialState"]:
-                    if key in page_props and isinstance(page_props[key], list) and len(page_props[key]) > 0:
-                        return page_props[key]
+                for key in ["items", "marketItems", "data", "listings", "results"]:
+                    val = page_props.get(key)
+                    if isinstance(val, list) and len(val) > 0:
+                        # Schema.org nesnelerini filtrele
+                        gercek_ilanlar = [x for x in val if isinstance(x, dict) and "@context" not in x]
+                        if gercek_ilanlar:
+                            print(f"📦 [{urun_adi}] __NEXT_DATA__ üzerinden {len(gercek_ilanlar)} ilan alındı.", flush=True)
+                            return gercek_ilanlar
             except Exception:
                 pass
 
-        # 2. JSON dizi blokları
-        json_blocks = re.findall(r'\[\s*\{.*?"item_name".*?\}\s*\]|\[\s*\{.*?"name".*?\}\s*\]', html, re.DOTALL)
-        for block in json_blocks:
-            try:
-                parsed = json.loads(block)
-                if isinstance(parsed, list) and len(parsed) > 0:
-                    return parsed
-            except Exception:
+        # 2. Render edilmiş HTML Tablosu / Kart Ayrıştırma (DOM Regex Fallback)
+        bulunan_ilanlar = []
+        satirlar = re.findall(r'<tr[^>]*>(.*?)</tr>', html, re.DOTALL | re.IGNORECASE)
+        for satir in satirlar:
+            if "schema.org" in satir.lower():
                 continue
+            metin = re.sub(r'<[^>]+>', ' ', satir).strip()
+            if arama_kelimesi.lower() in metin.lower():
+                won_bul = re.search(r'(\d+(?:[.,]\d+)?)\s*won', metin, re.IGNORECASE)
+                if won_bul:
+                    fiyat = float(won_bul.group(1).replace(",", "."))
+                    bulunan_ilanlar.append({
+                        "name": urun_adi,
+                        "price_won": fiyat,
+                        "seller": "Pazar İlanı",
+                        "bonuses": []
+                    })
 
+        if bulunan_ilanlar:
+            print(f"📦 [{urun_adi}] DOM üzerinden {len(bulunan_ilanlar)} ilan ayrıştırıldı.", flush=True)
+            return bulunan_ilanlar
+
+        print(f"ℹ️ [{urun_adi}] Render tamamlandı, eşleşen ilan bulunamadı.", flush=True)
         return []
+
     except Exception as e:
-        print(f"⚠️ [{urun_adi}] İstek hatası: {e}", flush=True)
+        print(f"⚠️ [{urun_adi}] İstek Hatası: {e}", flush=True)
         return []
 
 def pazar_tarama_dongusu():
@@ -249,23 +274,20 @@ def pazar_tarama_dongusu():
                 items = fetch_pazar_verisi(hedef["isim"])
 
                 for item in items:
-                    # Gelen objenin ilk örneğini terminale dökelim
-                    print(f"📋 Yakalanan Ham İlan Objesi: {json.dumps(item, ensure_ascii=False)[:180]}", flush=True)
+                    name = item.get("name") or item.get("item_name") or ""
+                    if not name:
+                        continue
 
-                    name = item.get("name") or item.get("item_name") or item.get("title") or ""
-                    
-                    # Fiyatı tüm olası anahtarlardan tara
-                    price_val = item.get("price_won") or item.get("won") or item.get("price") or item.get("yang") or 0
+                    price_val = item.get("price_won") or item.get("won") or item.get("price") or 0
                     try:
                         price = float(price_val)
-                        if price > 5000:  # Yang olarak gelmişse Won'a dönüştür
+                        if price > 5000:
                             price = price / 100000000.0
                     except Exception:
                         price = 9999
 
                     item_id = str(item.get("id") or item.get("_id") or f"{name}_{price}_{item.get('seller', '')}")
 
-                    # Arama eşleşmesi
                     if aranan_tam_ad not in name.lower() and name.lower() not in aranan_tam_ad:
                         continue
                     if price > limit_won:
@@ -273,8 +295,8 @@ def pazar_tarama_dongusu():
                     if item_id in seen_ids:
                         continue
 
-                    seller = item.get("seller") or item.get("player_name") or item.get("shop") or "Bilinmiyor"
-                    bonuses = item.get("bonuses") or item.get("efsunlar") or item.get("attributes") or []
+                    seller = item.get("seller") or item.get("player_name") or "Bilinmiyor"
+                    bonuses = item.get("bonuses") or item.get("efsunlar") or []
                     efsun_yazisi = "\n".join([f"• {b}" for b in bonuses]) if bonuses else "Standart"
 
                     mesaj = (
