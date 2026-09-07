@@ -1,5 +1,6 @@
 import json
 import os
+import re
 import time
 import threading
 import requests
@@ -17,16 +18,21 @@ SERVER_NAME = "Charon"
 
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "").strip()
 CHAT_ID = os.environ.get("CHAT_ID", "").strip()
-API_URL = os.environ.get("API_URL", "").strip()
+
+# URL'deki görünmez karakterleri ve sondaki eğik çizgiyi temizle
+raw_api = os.environ.get("API_URL", "").strip()
+API_URL = re.sub(r'[^\x20-\x7E]', '', raw_api).rstrip("/")
+
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "").strip()
 
 DB_FILE = "bildirilenler.json"
 LISTE_FILE = "takip_listesi.json"
 STATE_FILE = "bot_state.json"
 
-HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+# curl_cffi'nin kendi User-Agent üretimine müdahale etmeyen sade başlıklar
+BROWSER_HEADERS = {
     "Accept": "application/json, text/plain, */*",
+    "Accept-Language": "tr-TR,tr;q=0.9,en-US;q=0.8,en;q=0.7",
     "Referer": "https://metin2alerts.com/",
     "Origin": "https://metin2alerts.com"
 }
@@ -91,16 +97,17 @@ def gemini_ile_cozumle(kullanici_metni):
     Sen bir Metin2 pazar asistanısın. Kullanıcının Türkçe yazdığı mesajı analiz et ve niyetini JSON olarak çıkar.
 
     Niyetler (aksiyon):
-    1. "son_sil": Kullanıcı en son eklenen eşyaları geri almak / silmek istiyorsa (Örn: "en son eklediklerini sil", "az öncekileri çıkar", "son işlemi iptal et").
-    2. "sil": Kullanıcı belirli bir eşyayı veya kategoriyi silmek istiyorsa (Örn: "kaskları sil", "kara büyüyü kaldır"). "silinecekler" listesine aranacak kelimeleri ekle.
-    3. "temizle": Kullanıcı tüm listeyi sıfırlamak istiyorsa (Örn: "bütün listeyi sil", "her şeyi temizle").
-    4. "liste": Kullanıcı mevcut takip listesini görmek istiyorsa (Örn: "listeyi göster", "neler var", "listede ne ekli", "list").
+    1. "son_sil": Kullanıcı en son eklenen eşyaları geri almak / silmek istiyorsa.
+    2. "sil": Kullanıcı belirli bir eşyayı veya kategoriyi silmek istiyorsa.
+    3. "temizle": Kullanıcı tüm listeyi sıfırlamak istiyorsa.
+    4. "liste": Kullanıcı mevcut takip listesini görmek istiyorsa.
     5. "ekle": Kullanıcı pazarda aranacak yeni eşyalar tanımlıyorsa.
 
     Ekleme Kuralları:
-    - Sınıf odaklı isteklerde (örn: "sura için 15 ateş zırh") popüler eşyaların tam isimlerini türet ("Kara Büyü Zırh +9" gibi).
-    - Artı belirtilmemişse varsayılan "+9" yap. Fiyat yoksa max_won: 9999 ver.
-    - Efsunları sayısal değer ve sade haliyle diziye ekle ("15 ateş", "2000 hp").
+    - Kutsama Kağıdı, Ruh Taşı, Ayışığı gibi artı basılmayan eşyalara ASLA "+9" ekleme.
+    - Sadece zırh, kask, silah ve kalkan gibi eşyalarda artı belirtilmemişse varsayılan "+9" yap.
+    - Fiyat yoksa max_won: 9999 ver.
+    - Efsunları sade haliyle diziye ekle ("15 ateş", "2000 hp").
 
     Çıktı SADECE geçerli bir JSON nesnesi olmalıdır:
     {{
@@ -131,7 +138,7 @@ def gemini_ile_cozumle(kullanici_metni):
 
 def liste_mesaji_gonder(takip_listesi):
     if not takip_listesi:
-        send_telegram("📋 Takip listeniz şu an boş.\n\nİstediğin eşyayı günlük dille yazabilirsin (Örn: <i>Sura 15 ateş kask ve zırh 40 won</i>).")
+        send_telegram("📋 Takip listeniz şu an boş.\n\nİstediğin eşyayı günlük dille yazabilirsin (Örn: <i>Sura 15 ateş kask 40 won</i>).")
     else:
         metin = "📋 <b>Aktif Takip Listesi (Charon):</b>\n\n"
         for itm in takip_listesi:
@@ -172,9 +179,7 @@ def telegram_dinleyici_dongusu():
                     continue
 
                 with lock:
-                    takip_listesi = load_json(LISTE_FILE, [
-                        {"isim": "Zehir Kılıcı +9", "max_won": 50, "efsunlar": []}
-                    ])
+                    takip_listesi = load_json(LISTE_FILE, [])
                     son_eklenenler = state.get("son_eklenenler", [])
                     degisiklik_var = False
 
@@ -268,7 +273,7 @@ def telegram_dinleyici_dongusu():
             time.sleep(3)
 
 # -------------------------------------------------------------
-# 🔍 METIN2 PAZAR TARAYICISI (GELİŞMİŞ LOG DESTEKLİ)
+# 🔍 METIN2 PAZAR TARAYICISI (DOĞAL CHROME TLS DESTEKLİ)
 # -------------------------------------------------------------
 def fetch_data(urun_adi):
     arama_kelimesi = urun_adi.split("+")[0].strip() if "+" in urun_adi else urun_adi
@@ -279,22 +284,27 @@ def fetch_data(urun_adi):
 
     if HAS_CURL:
         try:
-            r = cureq.get(API_URL, params=params, headers=HEADERS, impersonate="chrome120", timeout=15)
+            # Sadece curl_cffi kullanıyoruz; User-Agent'ı chrome120 motoru kendisi yönetsin
+            r = cureq.get(API_URL, params=params, headers=BROWSER_HEADERS, impersonate="chrome120", timeout=15)
             if r.status_code == 200:
                 return r.json()
             else:
-                print(f"⚠️ [{urun_adi}] curl_cffi HTTP Hatası: {r.status_code}", flush=True)
+                yanit_ozeti = r.text[:120].replace('\n', ' ')
+                print(f"⚠️ [{urun_adi}] API HTTP {r.status_code}: {yanit_ozeti}", flush=True)
+                return None
         except Exception as e:
-            print(f"⚠️ [{urun_adi}] curl_cffi İstek Hatası: {e}", flush=True)
+            print(f"⚠️ [{urun_adi}] Bağlantı Hatası: {e}", flush=True)
+            return None
 
+    # curl_cffi yoksa standart requests
     try:
-        r = requests.get(API_URL, params=params, headers=HEADERS, timeout=15)
+        r = requests.get(API_URL, params=params, headers=BROWSER_HEADERS, timeout=15)
         if r.status_code == 200:
             return r.json()
         else:
-            print(f"⚠️ [{urun_adi}] requests HTTP Hatası: {r.status_code}", flush=True)
+            print(f"⚠️ [{urun_adi}] requests HTTP {r.status_code}", flush=True)
     except Exception as e:
-        print(f"⚠️ [{urun_adi}] requests İstek Hatası: {e}", flush=True)
+        print(f"⚠️ [{urun_adi}] requests Hatası: {e}", flush=True)
 
     return None
 
@@ -325,17 +335,14 @@ def pazar_tarama_dongusu():
 
                 data = fetch_data(hedef["isim"])
                 
-                # API tamamen erişilmezse
                 if data is None:
-                    print(f"❌ [{hedef['isim']}] API verisi alınamadı (Bağlantı engeli/hatası).", flush=True)
                     time.sleep(2)
                     continue
 
                 items = data if isinstance(data, list) else (data.get("items") or data.get("data") or data.get("results") or [])
 
-                # Pazarda bu isimle hiç ilan yoksa
                 if len(items) == 0:
-                    print(f"ℹ️ [{hedef['isim']}] Pazarda bu isimle aktif ilan yok (0 adet).", flush=True)
+                    print(f"ℹ️ [{hedef['isim']}] Pazarda aktif ilan bulunamadı (0 adet).", flush=True)
                     time.sleep(2)
                     continue
 
