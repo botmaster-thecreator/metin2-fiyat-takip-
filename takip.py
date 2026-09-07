@@ -46,7 +46,6 @@ def save_json(dosya, veri):
 
 def send_telegram(text):
     if not TELEGRAM_TOKEN or not CHAT_ID:
-        print("HATA: TELEGRAM_TOKEN veya CHAT_ID Secrets içinde tanımlı değil!")
         return
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
     payload = {
@@ -56,17 +55,12 @@ def send_telegram(text):
         "disable_web_page_preview": True
     }
     try:
-        r = requests.post(url, json=payload, timeout=10)
-        if r.status_code != 200:
-            print(f"Telegram Mesaj Gönderme Başarısız ({r.status_code}): {r.text}")
-        else:
-            print("Telegram mesajı başarıyla iletildi.")
+        requests.post(url, json=payload, timeout=10)
     except Exception as e:
         print(f"Telegram İstek Hatası: {e}")
 
 def komutlari_isle(takip_listesi):
     if not TELEGRAM_TOKEN:
-        print("HATA: TELEGRAM_TOKEN bulunamadı!")
         return takip_listesi
 
     state = load_json(STATE_FILE, {"last_update_id": 0})
@@ -76,13 +70,10 @@ def komutlari_isle(takip_listesi):
     try:
         r = requests.get(url, timeout=10)
         res = r.json()
-
         if not res.get("ok"):
-            print(f"Telegram getUpdates Hatası: {res}")
             return takip_listesi
 
         updates = res.get("result", [])
-        print(f"Gelen bekleyen mesaj sayısı: {len(updates)}")
         degisiklik_var = False
 
         for update in updates:
@@ -94,23 +85,39 @@ def komutlari_isle(takip_listesi):
             text = msg.get("text", "").strip()
             sender_id = str(msg.get("chat", {}).get("id", "")).strip()
 
-            print(f"Okunan komut: '{text}' | Gönderen Chat ID: '{sender_id}'")
-
-            if sender_id != CHAT_ID:
-                print(f"ID Uyuşmazlığı! Secret CHAT_ID: '{CHAT_ID}', Gelen ID: '{sender_id}'")
+            if sender_id != CHAT_ID or not text:
                 continue
 
             if text.startswith("/ekle"):
-                parcalar = text.replace("/ekle", "").strip().rsplit(" ", 1)
+                # Örnek 1: /ekle Zehir Kılıcı +9 50
+                # Örnek 2: /ekle Zehir Kılıcı +9 80 | ortalama
+                # Örnek 3: /ekle Siyah Çelik Zırh +9 40 | hp, kılıç
+                text_clean = text.replace("/ekle", "", 1).strip()
+                efsunlar = []
+
+                if "|" in text_clean:
+                    item_kismi, efsun_kismi = text_clean.split("|", 1)
+                    efsunlar = [e.strip().lower() for e in efsun_kismi.split(",") if e.strip()]
+                else:
+                    item_kismi = text_clean
+
+                parcalar = item_kismi.strip().rsplit(" ", 1)
                 if len(parcalar) == 2 and parcalar[1].replace(".", "", 1).isdigit():
                     isim = parcalar[0].strip()
                     fiyat = float(parcalar[1])
+                    
+                    # Varsa eski kaydı temizle
                     takip_listesi = [item for item in takip_listesi if item["isim"].lower() != isim.lower()]
-                    takip_listesi.append({"isim": isim, "max_won": fiyat})
+                    takip_listesi.append({
+                        "isim": isim,
+                        "max_won": fiyat,
+                        "efsunlar": efsunlar
+                    })
                     degisiklik_var = True
-                    send_telegram(f"✅ <b>Listeye Eklendi:</b> {isim} (Tavan: {fiyat} Won)")
+                    efsun_notu = f"\n🎯 <b>Aranan Efsunlar:</b> {', '.join(efsunlar)}" if efsunlar else ""
+                    send_telegram(f"✅ <b>Listeye Eklendi:</b> {isim}\n💰 <b>Tavan:</b> {fiyat} Won{efsun_notu}")
                 else:
-                    send_telegram("⚠️ Hatalı format! Örnek: <code>/ekle Dolunay Kılıcı 15</code>")
+                    send_telegram("⚠️ <b>Hatalı format!</b>\nÖrnek: <code>/ekle Dolunay Kılıcı +9 15</code>\nEfsunlu: <code>/ekle Zehir Kılıcı +9 80 | ortalama</code>")
 
             elif text.startswith("/sil"):
                 isim = text.replace("/sil", "").strip()
@@ -128,8 +135,10 @@ def komutlari_isle(takip_listesi):
                 else:
                     metin = "📋 <b>Aktif Takip Listesi (Charon):</b>\n\n"
                     for itm in takip_listesi:
-                        metin += f"• {itm['isim']} ➔ Maks: {itm['max_won']} Won\n"
-                    metin += "\n<i>Yeni eşya eklemek için: /ekle İsim Fiyat</i>"
+                        efs = itm.get("efsunlar", [])
+                        efs_metin = f" <i>(Filtre: {', '.join(efs)})</i>" if efs else ""
+                        metin += f"• <b>{itm['isim']}</b> ➔ Maks: {itm['max_won']} Won{efs_metin}\n"
+                    metin += "\n<i>Yeni ekleme: /ekle İsim +9 Fiyat | efsun1, efsun2</i>"
                     send_telegram(metin)
 
         state["last_update_id"] = last_id
@@ -143,7 +152,13 @@ def komutlari_isle(takip_listesi):
     return takip_listesi
 
 def fetch_data(urun_adi):
-    params = {"server": SERVER_NAME, "query": urun_adi}
+    # Aramayı sade isimle yapar (pazar API'si tam artı derecesiyle aramalarda sonuç döndürmezse diye ana adı baz alır)
+    arama_kelimesi = urun_adi.split("+")[0].strip() if "+" in urun_adi else urun_adi
+    # Parantez içi cinsiyet varsa kaldırıp aratır (örn: "Kostüm (E)" -> "Kostüm")
+    if "(" in arama_kelimesi:
+        arama_kelimesi = arama_kelimesi.split("(")[0].strip()
+
+    params = {"server": SERVER_NAME, "query": arama_kelimesi}
     if HAS_CURL:
         try:
             r = cureq.get(API_URL, params=params, headers=HEADERS, impersonate="chrome120", timeout=15)
@@ -162,8 +177,8 @@ def fetch_data(urun_adi):
 
 def main():
     varsayilan_liste = [
-        {"isim": "Zehir Kılıcı", "max_won": 50},
-        {"isim": "Kin Kılıcı", "max_won": 30}
+        {"isim": "Zehir Kılıcı +9", "max_won": 50, "efsunlar": []},
+        {"isim": "Kin Kılıcı +9", "max_won": 30, "efsunlar": []}
     ]
     takip_listesi = load_json(LISTE_FILE, varsayilan_liste)
     takip_listesi = komutlari_isle(takip_listesi)
@@ -174,10 +189,11 @@ def main():
     print(f"[{SERVER_NAME}] Tarama başlatıldı...")
 
     for hedef in takip_listesi:
-        aranan = hedef["isim"]
+        aranan_tam_ad = hedef["isim"].lower()
         limit_won = hedef["max_won"]
+        istenen_efsunlar = hedef.get("efsunlar", [])
 
-        data = fetch_data(aranan)
+        data = fetch_data(hedef["isim"])
         if not data:
             time.sleep(2)
             continue
@@ -191,27 +207,41 @@ def main():
             bonuses = item.get("bonuses", item.get("efsunlar", []))
             seller = item.get("seller", item.get("player_name", "Bilinmiyor"))
 
-            if aranan.lower() in name.lower() and price <= limit_won:
-                if item_id in seen_ids:
+            # 1. İsim ve Artı/Cinsiyet Kontrolü
+            if aranan_tam_ad not in name.lower():
+                continue
+
+            # 2. Fiyat Kontrolü
+            if price > limit_won:
+                continue
+
+            # 3. Efsun Kontrolü (Varsa tüm istenen kelimeler efsunlarda geçmeli)
+            if istenen_efsunlar:
+                tum_efsun_metni = " ".join([str(b) for b in bonuses]).lower()
+                if not all(efsun in tum_efsun_metni for efsun in istenen_efsunlar):
                     continue
 
-                efsun_yazisi = "\n".join([f"• {b}" for b in bonuses]) if bonuses else "Standart / Belirtilmemiş"
+            # Daha önce bildirildiyse atla
+            if item_id in seen_ids:
+                continue
 
-                mesaj = (
-                    f"🚨 <b>METIN2 FIRSAT İLANI!</b>\n"
-                    f"━━━━━━━━━━━━━━━━━━\n"
-                    f"🗡️ <b>Eşya:</b> {name}\n"
-                    f"💰 <b>Fiyat:</b> {price} Won (Hedef: ≤{limit_won} Won)\n"
-                    f"👤 <b>Satıcı:</b> {seller}\n"
-                    f"🌐 <b>Sunucu:</b> {SERVER_NAME}\n\n"
-                    f"✨ <b>Efsunlar / Taşlar:</b>\n{efsun_yazisi}\n"
-                    f"━━━━━━━━━━━━━━━━━━"
-                )
+            efsun_yazisi = "\n".join([f"• {b}" for b in bonuses]) if bonuses else "Standart / Belirtilmemiş"
 
-                send_telegram(mesaj)
-                seen_ids.add(item_id)
-                yeni_bildirim_sayisi += 1
-                time.sleep(1)
+            mesaj = (
+                f"🚨 <b>METIN2 FIRSAT İLANI!</b>\n"
+                f"━━━━━━━━━━━━━━━━━━\n"
+                f"🗡️ <b>Eşya:</b> {name}\n"
+                f"💰 <b>Fiyat:</b> {price} Won (Hedef: ≤{limit_won} Won)\n"
+                f"👤 <b>Satıcı:</b> {seller}\n"
+                f"🌐 <b>Sunucu:</b> {SERVER_NAME}\n\n"
+                f"✨ <b>Efsunlar / Taşlar:</b>\n{efsun_yazisi}\n"
+                f"━━━━━━━━━━━━━━━━━━"
+            )
+
+            send_telegram(mesaj)
+            seen_ids.add(item_id)
+            yeni_bildirim_sayisi += 1
+            time.sleep(1)
 
         time.sleep(2)
 
