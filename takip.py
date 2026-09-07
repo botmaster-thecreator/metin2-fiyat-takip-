@@ -180,7 +180,7 @@ def telegram_dinleyici_dongusu():
             time.sleep(3)
 
 # -------------------------------------------------------------
-# 🔍 METIN2 PAZAR VERİ ÇEKİCİ (KÖK ADRES)
+# 🔍 METIN2 PAZAR VERİ ÇEKİCİ (ALTERNATİF UÇ NOKTALAR)
 # -------------------------------------------------------------
 def fetch_pazar_verisi(urun_adi):
     arama_kelimesi = urun_adi.split("+")[0].strip() if "+" in urun_adi else urun_adi
@@ -188,66 +188,64 @@ def fetch_pazar_verisi(urun_adi):
         arama_kelimesi = arama_kelimesi.split("(")[0].strip()
 
     encoded_query = urllib.parse.quote(arama_kelimesi)
-    target_url = f"https://metin2alerts.com/?server={SERVER_NAME}&query={encoded_query}"
+    
+    # Denenecek olası endpoint alternatifleri
+    denenecek_adresler = [
+        f"https://metin2alerts.com/api/search?server={SERVER_NAME}&query={encoded_query}",
+        f"https://metin2alerts.com/api/items?server={SERVER_NAME}&search={encoded_query}",
+        f"https://metin2alerts.com/market?server={SERVER_NAME}&query={encoded_query}"
+    ]
 
     if not SCRAPER_API_KEY:
-        print("⚠️ SCRAPER_API_KEY bulunamadı.", flush=True)
         return []
 
     scraper_url = "http://api.scraperapi.com"
-    params = {
-        "api_key": SCRAPER_API_KEY,
-        "url": target_url,
-        "render": "true",
-        "wait": "4000"
-    }
 
-    try:
-        r = requests.get(scraper_url, params=params, timeout=60)
-        if r.status_code != 200:
-            print(f"⚠️ [{urun_adi}] ScraperAPI HTTP {r.status_code}", flush=True)
-            return []
+    for target_url in denenecek_adresler:
+        params = {
+            "api_key": SCRAPER_API_KEY,
+            "url": target_url,
+            "render": "true"
+        }
+        try:
+            r = requests.get(scraper_url, params=params, timeout=30)
+            if r.status_code == 200:
+                # JSON dönme ihtimaline karşı kontrol
+                try:
+                    data = r.json()
+                    if isinstance(data, list) and len(data) > 0:
+                        return data
+                    elif isinstance(data, dict):
+                        for k in ["items", "data", "results", "listings"]:
+                            if isinstance(data.get(k), list) and len(data[k]) > 0:
+                                return data[k]
+                except Exception:
+                    pass
 
-        html = r.text
+                # HTML dönmüşse içindeki kartları tara
+                html = r.text
+                bulunan_ilanlar = []
+                satirlar = re.findall(r'<tr[^>]*>(.*?)</tr>', html, re.DOTALL | re.IGNORECASE)
+                for satir in satirlar:
+                    if "schema.org" in satir.lower():
+                        continue
+                    metin = re.sub(r'<[^>]+>', ' ', satir).strip()
+                    if arama_kelimesi.lower() in metin.lower() and "won" in metin.lower():
+                        won_eslesme = re.search(r'(\d+(?:[.,]\d+)?)\s*won', metin, re.IGNORECASE)
+                        if won_eslesme:
+                            fiyat = float(won_eslesme.group(1).replace(",", "."))
+                            bulunan_ilanlar.append({
+                                "name": urun_adi,
+                                "price_won": fiyat,
+                                "seller": "Pazar İlanı",
+                                "bonuses": []
+                            })
+                if bulunan_ilanlar:
+                    return bulunan_ilanlar
+        except Exception:
+            continue
 
-        # Next.js veya gömülü JSON veri bloklarını tara
-        next_data_match = re.search(r'<script id="__NEXT_DATA__" type="application/json">(.*?)</script>', html, re.DOTALL)
-        if next_data_match:
-            try:
-                data = json.loads(next_data_match.group(1))
-                page_props = data.get("props", {}).get("pageProps", {})
-                for key in ["items", "marketItems", "data", "listings", "results", "market"]:
-                    val = page_props.get(key)
-                    if isinstance(val, list) and len(val) > 0:
-                        gercek_ilanlar = [x for x in val if isinstance(x, dict) and "@context" not in x]
-                        if gercek_ilanlar:
-                            return gercek_ilanlar
-            except Exception:
-                pass
-
-        # HTML DOM elemanları içinden arama
-        bulunan_ilanlar = []
-        bloklar = re.findall(r'(<(?:div|tr|li)[^>]*?>.*?</(?:div|tr|li)>)', html, re.DOTALL | re.IGNORECASE)
-        for blokлица in bloklar:
-            if "schema.org" in blokлица.lower():
-                continue
-            metin = re.sub(r'<[^>]+>', ' ', blokлица).strip()
-            if arama_kelimesi.lower() in metin.lower() and "won" in metin.lower():
-                won_eslesme = re.search(r'(\d+(?:[.,]\d+)?)\s*won', metin, re.IGNORECASE)
-                if won_eslesme:
-                    fiyat = float(won_eslesme.group(1).replace(",", "."))
-                    bulunan_ilanlar.append({
-                        "name": urun_adi,
-                        "price_won": fiyat,
-                        "seller": "Pazar İlanı",
-                        "bonuses": [metin[:100]]
-                    })
-
-        return bulunan_ilanlar
-
-    except Exception as e:
-        print(f"⚠️ [{urun_adi}] İstek Hatası: {e}", flush=True)
-        return []
+    return []
 
 # -------------------------------------------------------------
 # 🔄 PAZAR TARAMA DÖNGÜSÜ
