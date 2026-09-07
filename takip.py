@@ -19,7 +19,6 @@ SERVER_NAME = "Charon"
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "").strip()
 CHAT_ID = os.environ.get("CHAT_ID", "").strip()
 
-# URL'deki görünmez karakterleri ve sondaki eğik çizgiyi temizle
 raw_api = os.environ.get("API_URL", "").strip()
 API_URL = re.sub(r'[^\x20-\x7E]', '', raw_api).rstrip("/")
 
@@ -29,7 +28,6 @@ DB_FILE = "bildirilenler.json"
 LISTE_FILE = "takip_listesi.json"
 STATE_FILE = "bot_state.json"
 
-# curl_cffi'nin kendi User-Agent üretimine müdahale etmeyen sade başlıklar
 BROWSER_HEADERS = {
     "Accept": "application/json, text/plain, */*",
     "Accept-Language": "tr-TR,tr;q=0.9,en-US;q=0.8,en;q=0.7",
@@ -40,7 +38,7 @@ BROWSER_HEADERS = {
 lock = threading.Lock()
 
 # -------------------------------------------------------------
-# 🌐 FLASK WEB SUNUCUSU (Render Canlı Tutma)
+# 🌐 FLASK WEB SUNUCUSU
 # -------------------------------------------------------------
 app = Flask(__name__)
 
@@ -87,6 +85,32 @@ def send_telegram(text):
         print(f"Telegram Gönderim Hatası: {e}", flush=True)
 
 # -------------------------------------------------------------
+# ⚡ HIZLI KURAL AYRIŞTIRICI (API GEREKTİRMEZ)
+# -------------------------------------------------------------
+def hizli_ayristir(metin):
+    # Örn: "Kutsama kağıdı 999 won", "Dolunay Kılıcı +9 50 won 15 ateş"
+    kalip = r"^(?P<isim>.+?)\s+(?P<won>\d+(?:[\.,]\d+)?)\s*won(?:\s+(?P<efsun>.*))?$"
+    eslesme = re.match(kalip, metin.strip(), re.IGNORECASE)
+    if not eslesme:
+        return None
+
+    ad = eslesme.group("isim").strip()
+    won_str = eslesme.group("won").replace(",", ".")
+    fiyat = float(won_str)
+    efsun_ham = eslesme.group("efsun")
+    efsunlar = [e.strip().lower() for e in efsun_ham.split(",")] if efsun_ham else []
+
+    arti_eklenmeyenler = ["kutsama kağıdı", "ruh taşı", "ayışığı", "büyülü metal", "inci", "zen fasulyesi"]
+    if not any(k in ad.lower() for k in arti_eklenmeyenler):
+        if not re.search(r"\+\d+$", ad):
+            ad += " +9"
+
+    return {
+        "aksiyon": "ekle",
+        "esyalar": [{"isim": ad.title() if "+" not in ad else ad, "max_won": fiyat, "efsunlar": efsunlar}]
+    }
+
+# -------------------------------------------------------------
 # 🧠 GEMINI DOĞAL DİL ANALİZİ
 # -------------------------------------------------------------
 def gemini_ile_cozumle(kullanici_metni):
@@ -97,22 +121,22 @@ def gemini_ile_cozumle(kullanici_metni):
     Sen bir Metin2 pazar asistanısın. Kullanıcının Türkçe yazdığı mesajı analiz et ve niyetini JSON olarak çıkar.
 
     Niyetler (aksiyon):
-    1. "son_sil": Kullanıcı en son eklenen eşyaları geri almak / silmek istiyorsa.
-    2. "sil": Kullanıcı belirli bir eşyayı veya kategoriyi silmek istiyorsa.
-    3. "temizle": Kullanıcı tüm listeyi sıfırlamak istiyorsa.
-    4. "liste": Kullanıcı mevcut takip listesini görmek istiyorsa.
-    5. "ekle": Kullanıcı pazarda aranacak yeni eşyalar tanımlıyorsa.
+    1. "son_sil": En son eklenen eşyaları silmek/geri almak.
+    2. "sil": Belirli bir eşyayı/kategoriyi silmek. "silinecekler" listesine aranacak kelimeleri ekle.
+    3. "temizle": Tüm listeyi sıfırlamak.
+    4. "liste": Mevcut takip listesini görmek.
+    5. "ekle": Yeni eşyalar eklemek.
 
     Ekleme Kuralları:
-    - Kutsama Kağıdı, Ruh Taşı, Ayışığı gibi artı basılmayan eşyalara ASLA "+9" ekleme.
-    - Sadece zırh, kask, silah ve kalkan gibi eşyalarda artı belirtilmemişse varsayılan "+9" yap.
+    - Kutsama Kağıdı, Ruh Taşı gibi artı basılmayan eşyalara ASLA "+9" ekleme.
+    - Zırh, kask, silah gibi eşyalarda artı belirtilmemişse varsayılan "+9" yap.
     - Fiyat yoksa max_won: 9999 ver.
-    - Efsunları sade haliyle diziye ekle ("15 ateş", "2000 hp").
+    - Efsunları sade diziye ekle ("15 ateş", "2000 hp").
 
     Çıktı SADECE geçerli bir JSON nesnesi olmalıdır:
     {{
       "aksiyon": "ekle" | "son_sil" | "sil" | "temizle" | "liste",
-      "silinecekler": ["kelime1", "kelime2"],
+      "silinecekler": ["kelime1"],
       "esyalar": [
         {{"isim": "Kara Büyü Zırh +9", "max_won": 50.0, "efsunlar": ["15 ateş"]}}
       ]
@@ -121,7 +145,7 @@ def gemini_ile_cozumle(kullanici_metni):
     Kullanıcı İsteği: "{kullanici_metni}"
     """
 
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={GEMINI_API_KEY}"
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={GEMINI_API_KEY}"
     payload = {
         "contents": [{"parts": [{"text": prompt}]}],
         "generationConfig": {"response_mime_type": "application/json"}
@@ -129,8 +153,13 @@ def gemini_ile_cozumle(kullanici_metni):
 
     try:
         res = requests.post(url, json=payload, timeout=20)
+        if res.status_code != 200:
+            print(f"Gemini API Hatası ({res.status_code}): {res.text[:150]}", flush=True)
+            return None
         data = res.json()
-        raw_json = data["candidates"][0]["content"]["parts"][0]["text"]
+        raw_json = data["candidates"][0]["content"]["parts"][0]["text"].strip()
+        raw_json = re.sub(r"^```json\s*", "", raw_json)
+        raw_json = re.sub(r"\s*```$", "", raw_json)
         return json.loads(raw_json)
     except Exception as e:
         print(f"Gemini Çözümleme Hatası: {e}", flush=True)
@@ -138,7 +167,7 @@ def gemini_ile_cozumle(kullanici_metni):
 
 def liste_mesaji_gonder(takip_listesi):
     if not takip_listesi:
-        send_telegram("📋 Takip listeniz şu an boş.\n\nİstediğin eşyayı günlük dille yazabilirsin (Örn: <i>Sura 15 ateş kask 40 won</i>).")
+        send_telegram("📋 Takip listeniz şu an boş.\n\nİstediğin eşyayı ekleyebilirsin:\nÖrn: <code>Kutsama Kağıdı 999 won</code> veya <code>Sura zırh 15 ateş 40 won</code>")
     else:
         metin = "📋 <b>Aktif Takip Listesi (Charon):</b>\n\n"
         for itm in takip_listesi:
@@ -183,8 +212,16 @@ def telegram_dinleyici_dongusu():
                     son_eklenenler = state.get("son_eklenenler", [])
                     degisiklik_var = False
 
-                    if text.lower() in ["/liste", "/list", "/start", "liste", "list"]:
+                    temiz_komut = text.lower()
+
+                    if temiz_komut in ["/liste", "/list", "/start", "liste", "list"]:
                         liste_mesaji_gonder(takip_listesi)
+
+                    elif temiz_komut in ["/temizle", "temizle", "sıfırla", "bütün listeyi sil", "her şeyi sil"]:
+                        takip_listesi = []
+                        son_eklenenler = []
+                        degisiklik_var = True
+                        send_telegram("🧹 <b>Takip listen tamamen temizlendi!</b>")
 
                     elif text.startswith("/sil"):
                         hedef = text.replace("/sil", "").strip().lower()
@@ -197,11 +234,16 @@ def telegram_dinleyici_dongusu():
                             send_telegram(f"⚠️ <b>{hedef}</b> takip listesinde bulunamadı.")
 
                     else:
-                        send_telegram("🧠 İsteğin analiz ediliyor...")
-                        analiz = gemini_ile_cozumle(text)
+                        # 1. Aşama: Hızlı Regex kontrolü (Gemini kotasını tüketmez)
+                        analiz = hizli_ayristir(text)
+
+                        # 2. Aşama: Eşleşmezse Gemini ile doğal dil analizi
+                        if not analiz:
+                            send_telegram("🧠 İsteğin analiz ediliyor...")
+                            analiz = gemini_ile_cozumle(text)
 
                         if not analiz:
-                            send_telegram("⚠️ İsteğin anlaşılamadı. Lütfen tekrar dene.")
+                            send_telegram("⚠️ İsteğin anlaşılamadı. Örnek: <code>Kutsama Kağıdı 999 won</code>")
                         else:
                             aksiyon = analiz.get("aksiyon")
 
@@ -222,7 +264,7 @@ def telegram_dinleyici_dongusu():
                             elif aksiyon == "sil":
                                 silinecekler = [s.lower() for s in analiz.get("silinecekler", [])]
                                 if not silinecekler:
-                                    send_telegram("⚠️ Hangi eşyayı silmek istediğin tam anlaşılamadı.")
+                                    send_telegram("⚠️ Hangi eşyayı silmek istediğin anlaşılamadı.")
                                 else:
                                     eski_boyut = len(takip_listesi)
                                     takip_listesi = [
@@ -273,7 +315,7 @@ def telegram_dinleyici_dongusu():
             time.sleep(3)
 
 # -------------------------------------------------------------
-# 🔍 METIN2 PAZAR TARAYICISI (DOĞAL CHROME TLS DESTEKLİ)
+# 🔍 METIN2 PAZAR TARAYICISI
 # -------------------------------------------------------------
 def fetch_data(urun_adi):
     arama_kelimesi = urun_adi.split("+")[0].strip() if "+" in urun_adi else urun_adi
@@ -284,19 +326,15 @@ def fetch_data(urun_adi):
 
     if HAS_CURL:
         try:
-            # Sadece curl_cffi kullanıyoruz; User-Agent'ı chrome120 motoru kendisi yönetsin
             r = cureq.get(API_URL, params=params, headers=BROWSER_HEADERS, impersonate="chrome120", timeout=15)
             if r.status_code == 200:
                 return r.json()
             else:
                 yanit_ozeti = r.text[:120].replace('\n', ' ')
-                print(f"⚠️ [{urun_adi}] API HTTP {r.status_code}: {yanit_ozeti}", flush=True)
-                return None
+                print(f"⚠️ [{urun_adi}] curl_cffi HTTP {r.status_code}: {yanit_ozeti}", flush=True)
         except Exception as e:
-            print(f"⚠️ [{urun_adi}] Bağlantı Hatası: {e}", flush=True)
-            return None
+            print(f"⚠️ [{urun_adi}] curl_cffi Hatası: {e}", flush=True)
 
-    # curl_cffi yoksa standart requests
     try:
         r = requests.get(API_URL, params=params, headers=BROWSER_HEADERS, timeout=15)
         if r.status_code == 200:
@@ -342,7 +380,7 @@ def pazar_tarama_dongusu():
                 items = data if isinstance(data, list) else (data.get("items") or data.get("data") or data.get("results") or [])
 
                 if len(items) == 0:
-                    print(f"ℹ️ [{hedef['isim']}] Pazarda aktif ilan bulunamadı (0 adet).", flush=True)
+                    print(f"ℹ️ [{hedef['isim']}] Pazarda aktif ilan yok (0 adet).", flush=True)
                     time.sleep(2)
                     continue
 
