@@ -10,12 +10,12 @@ except ImportError:
     cureq = None
     HAS_CURL = False
 
-# 🌐 Sunucu Adı: Ruby Charon
+# 🌐 Sunucu Adı
 SERVER_NAME = "Charon"
 
-TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "")
-CHAT_ID = os.environ.get("CHAT_ID", "")
-API_URL = os.environ.get("API_URL", "")
+TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "").strip()
+CHAT_ID = os.environ.get("CHAT_ID", "").strip()
+API_URL = os.environ.get("API_URL", "").strip()
 
 DB_FILE = "bildirilenler.json"
 LISTE_FILE = "takip_listesi.json"
@@ -46,6 +46,7 @@ def save_json(dosya, veri):
 
 def send_telegram(text):
     if not TELEGRAM_TOKEN or not CHAT_ID:
+        print("HATA: TELEGRAM_TOKEN veya CHAT_ID Secrets içinde tanımlı değil!")
         return
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
     payload = {
@@ -55,18 +56,33 @@ def send_telegram(text):
         "disable_web_page_preview": True
     }
     try:
-        requests.post(url, json=payload, timeout=10)
+        r = requests.post(url, json=payload, timeout=10)
+        if r.status_code != 200:
+            print(f"Telegram Mesaj Gönderme Başarısız ({r.status_code}): {r.text}")
+        else:
+            print("Telegram mesajı başarıyla iletildi.")
     except Exception as e:
-        print(f"Telegram Gönderme Hatası: {e}")
+        print(f"Telegram İstek Hatası: {e}")
 
 def komutlari_isle(takip_listesi):
+    if not TELEGRAM_TOKEN:
+        print("HATA: TELEGRAM_TOKEN bulunamadı!")
+        return takip_listesi
+
     state = load_json(STATE_FILE, {"last_update_id": 0})
     last_id = state.get("last_update_id", 0)
     
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/getUpdates?offset={last_id + 1}"
     try:
-        res = requests.get(url, timeout=10).json()
+        r = requests.get(url, timeout=10)
+        res = r.json()
+
+        if not res.get("ok"):
+            print(f"Telegram getUpdates Hatası: {res}")
+            return takip_listesi
+
         updates = res.get("result", [])
+        print(f"Gelen bekleyen mesaj sayısı: {len(updates)}")
         degisiklik_var = False
 
         for update in updates:
@@ -76,28 +92,27 @@ def komutlari_isle(takip_listesi):
             
             msg = update.get("message", {})
             text = msg.get("text", "").strip()
-            sender_id = str(msg.get("chat", {}).get("id", ""))
+            sender_id = str(msg.get("chat", {}).get("id", "")).strip()
 
-            # Yalnızca senin gönderdiğin komutları işleme al
-            if sender_id != str(CHAT_ID) or not text:
+            print(f"Okunan komut: '{text}' | Gönderen Chat ID: '{sender_id}'")
+
+            if sender_id != CHAT_ID:
+                print(f"ID Uyuşmazlığı! Secret CHAT_ID: '{CHAT_ID}', Gelen ID: '{sender_id}'")
                 continue
 
             if text.startswith("/ekle"):
-                # Örnek kullanım: /ekle Zehir Kılıcı 50
                 parcalar = text.replace("/ekle", "").strip().rsplit(" ", 1)
                 if len(parcalar) == 2 and parcalar[1].replace(".", "", 1).isdigit():
                     isim = parcalar[0].strip()
                     fiyat = float(parcalar[1])
-                    # Varsa güncelle, yoksa ekle
                     takip_listesi = [item for item in takip_listesi if item["isim"].lower() != isim.lower()]
                     takip_listesi.append({"isim": isim, "max_won": fiyat})
                     degisiklik_var = True
                     send_telegram(f"✅ <b>Listeye Eklendi:</b> {isim} (Tavan: {fiyat} Won)")
                 else:
-                    send_telegram("⚠️ Hatalı format! Örnek: <code>/ekle Zehir Kılıcı 50</code>")
+                    send_telegram("⚠️ Hatalı format! Örnek: <code>/ekle Dolunay Kılıcı 15</code>")
 
             elif text.startswith("/sil"):
-                # Örnek kullanım: /sil Zehir Kılıcı
                 isim = text.replace("/sil", "").strip()
                 yeni_liste = [item for item in takip_listesi if item["isim"].lower() != isim.lower()]
                 if len(yeni_liste) != len(takip_listesi):
@@ -107,13 +122,14 @@ def komutlari_isle(takip_listesi):
                 else:
                     send_telegram(f"⚠️ <b>{isim}</b> takip listesinde bulunamadı.")
 
-            elif text == "/liste":
+            elif text == "/liste" or text == "/start":
                 if not takip_listesi:
                     send_telegram("📋 Takip listeniz şu an boş.")
                 else:
                     metin = "📋 <b>Aktif Takip Listesi (Charon):</b>\n\n"
                     for itm in takip_listesi:
                         metin += f"• {itm['isim']} ➔ Maks: {itm['max_won']} Won\n"
+                    metin += "\n<i>Yeni eşya eklemek için: /ekle İsim Fiyat</i>"
                     send_telegram(metin)
 
         state["last_update_id"] = last_id
@@ -122,7 +138,7 @@ def komutlari_isle(takip_listesi):
             save_json(LISTE_FILE, takip_listesi)
 
     except Exception as e:
-        print(f"Telegram güncelleme kontrol hatası: {e}")
+        print(f"Telegram okuma hatası: {e}")
 
     return takip_listesi
 
@@ -145,17 +161,13 @@ def fetch_data(urun_adi):
     return None
 
 def main():
-    # Varsayılan başlangıç listesi
     varsayilan_liste = [
         {"isim": "Zehir Kılıcı", "max_won": 50},
         {"isim": "Kin Kılıcı", "max_won": 30}
     ]
     takip_listesi = load_json(LISTE_FILE, varsayilan_liste)
-    
-    # 1. Telegram'dan gelen yeni komutları işle
     takip_listesi = komutlari_isle(takip_listesi)
 
-    # 2. Pazarı tara
     seen_ids = set(load_json(DB_FILE, []))
     yeni_bildirim_sayisi = 0
 
