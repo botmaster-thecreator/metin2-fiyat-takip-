@@ -20,7 +20,7 @@ STATE_FILE = "bot_state.json"
 lock = threading.Lock()
 
 # -------------------------------------------------------------
-# 🌐 FLASK WEB SUNUCUSU (Render Canlı Tutma)
+# 🌐 FLASK WEB SUNUCUSU
 # -------------------------------------------------------------
 app = Flask(__name__)
 
@@ -180,7 +180,7 @@ def telegram_dinleyici_dongusu():
             time.sleep(3)
 
 # -------------------------------------------------------------
-# 🔍 METIN2 PAZAR VERİ ÇEKİCİ (DOĞRU MARKET ENDPOINT)
+# 🔍 METIN2 PAZAR VERİ ÇEKİCİ (KÖK ADRES)
 # -------------------------------------------------------------
 def fetch_pazar_verisi(urun_adi):
     arama_kelimesi = urun_adi.split("+")[0].strip() if "+" in urun_adi else urun_adi
@@ -188,8 +188,7 @@ def fetch_pazar_verisi(urun_adi):
         arama_kelimesi = arama_kelimesi.split("(")[0].strip()
 
     encoded_query = urllib.parse.quote(arama_kelimesi)
-    # Doğrudan /market rotası
-    target_url = f"https://metin2alerts.com/market?server={SERVER_NAME}&search={encoded_query}"
+    target_url = f"https://metin2alerts.com/?server={SERVER_NAME}&query={encoded_query}"
 
     if not SCRAPER_API_KEY:
         print("⚠️ SCRAPER_API_KEY bulunamadı.", flush=True)
@@ -200,7 +199,7 @@ def fetch_pazar_verisi(urun_adi):
         "api_key": SCRAPER_API_KEY,
         "url": target_url,
         "render": "true",
-        "wait": "3000"
+        "wait": "4000"
     }
 
     try:
@@ -211,33 +210,29 @@ def fetch_pazar_verisi(urun_adi):
 
         html = r.text
 
-        # 1. Next.js Pazar Verisi
+        # Next.js veya gömülü JSON veri bloklarını tara
         next_data_match = re.search(r'<script id="__NEXT_DATA__" type="application/json">(.*?)</script>', html, re.DOTALL)
         if next_data_match:
             try:
                 data = json.loads(next_data_match.group(1))
                 page_props = data.get("props", {}).get("pageProps", {})
-                for key in ["items", "marketItems", "data", "listings", "results"]:
+                for key in ["items", "marketItems", "data", "listings", "results", "market"]:
                     val = page_props.get(key)
                     if isinstance(val, list) and len(val) > 0:
                         gercek_ilanlar = [x for x in val if isinstance(x, dict) and "@context" not in x]
                         if gercek_ilanlar:
-                            print(f"📦 [{urun_adi}] __NEXT_DATA__ üzerinden {len(gercek_ilanlar)} ilan alındı.", flush=True)
                             return gercek_ilanlar
             except Exception:
                 pass
 
-        # 2. Render edilmiş Tablo / Kart Ayrıştırma
+        # HTML DOM elemanları içinden arama
         bulunan_ilanlar = []
-        satirlar = re.findall(r'<tr[^>]*>(.*?)</tr>', html, re.DOTALL | re.IGNORECASE)
-        if not satirlar:
-            satirlar = re.findall(r'(<(?:div|li)[^>]*?(?:item|row|card|market)[^>]*?>.*?</(?:div|li)>)', html, re.DOTALL | re.IGNORECASE)
-
-        for satir in satirlar:
-            if "schema.org" in satir.lower():
+        bloklar = re.findall(r'(<(?:div|tr|li)[^>]*?>.*?</(?:div|tr|li)>)', html, re.DOTALL | re.IGNORECASE)
+        for blokлица in bloklar:
+            if "schema.org" in blokлица.lower():
                 continue
-            metin = re.sub(r'<[^>]+>', ' ', satir).strip()
-            if arama_kelimesi.lower() in metin.lower() and ("won" in metin.lower() or "yang" in metin.lower()):
+            metin = re.sub(r'<[^>]+>', ' ', blokлица).strip()
+            if arama_kelimesi.lower() in metin.lower() and "won" in metin.lower():
                 won_eslesme = re.search(r'(\d+(?:[.,]\d+)?)\s*won', metin, re.IGNORECASE)
                 if won_eslesme:
                     fiyat = float(won_eslesme.group(1).replace(",", "."))
@@ -245,16 +240,10 @@ def fetch_pazar_verisi(urun_adi):
                         "name": urun_adi,
                         "price_won": fiyat,
                         "seller": "Pazar İlanı",
-                        "bonuses": []
+                        "bonuses": [metin[:100]]
                     })
 
-        if bulunan_ilanlar:
-            print(f"📦 [{urun_adi}] Market sayfasından {len(bulunan_ilanlar)} adet ilan yakalandı!", flush=True)
-            return bulunan_ilanlar
-
-        temiz_ozet = re.sub(r'<[^>]+>', ' ', html)[:200].strip()
-        print(f"ℹ️ [{urun_adi}] İlan bulunamadı. Sayfa özeti: {temiz_ozet}", flush=True)
-        return []
+        return bulunan_ilanlar
 
     except Exception as e:
         print(f"⚠️ [{urun_adi}] İstek Hatası: {e}", flush=True)
