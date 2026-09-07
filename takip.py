@@ -6,13 +6,6 @@ import threading
 import requests
 from flask import Flask
 
-try:
-    from curl_cffi import requests as cureq
-    HAS_CURL = True
-except ImportError:
-    cureq = None
-    HAS_CURL = False
-
 SERVER_NAME = "Charon"
 
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "").strip()
@@ -22,29 +15,16 @@ raw_api = os.environ.get("API_URL", "https://metin2alerts.com/api/market/search"
 API_URL = re.sub(r'[^\x20-\x7E]', '', raw_api).rstrip("/")
 
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "").strip()
+SCRAPER_API_KEY = os.environ.get("SCRAPER_API_KEY", "").strip()
 
 DB_FILE = "bildirilenler.json"
 LISTE_FILE = "takip_listesi.json"
 STATE_FILE = "bot_state.json"
 
-BROWSER_HEADERS = {
-    "Accept": "application/json, text/plain, */*",
-    "Accept-Language": "tr-TR,tr;q=0.9,en-US;q=0.8,en;q=0.7",
-    "Referer": "https://metin2alerts.com/",
-    "Origin": "https://metin2alerts.com",
-    "Sec-Ch-Ua": '"Chromium";v="122", "Not(A:Brand";v="24", "Google Chrome";v="122"',
-    "Sec-Ch-Ua-Mobile": "?0",
-    "Sec-Ch-Ua-Platform": '"Windows"',
-    "Sec-Fetch-Dest": "empty",
-    "Sec-Fetch-Mode": "cors",
-    "Sec-Fetch-Site": "same-origin"
-}
-
 lock = threading.Lock()
-session_client = None
 
 # -------------------------------------------------------------
-# 🌐 FLASK WEB SUNUCUSU
+# 🌐 FLASK WEB SUNUCUSU (Render'ı Canlı Tutma)
 # -------------------------------------------------------------
 app = Flask(__name__)
 
@@ -249,52 +229,40 @@ def telegram_dinleyici_dongusu():
             time.sleep(3)
 
 # -------------------------------------------------------------
-# 🔍 METIN2 PAZAR TARAYICISI (SESSION & POST DESTEKLİ)
+# 🔍 METIN2 PAZAR TARAYICISI (SCRAPERAPI TÜNELİ)
 # -------------------------------------------------------------
-def get_session():
-    global session_client
-    if session_client is None and HAS_CURL:
-        session_client = cureq.Session(impersonate="chrome120")
-        try:
-            # Oturum başlatıp Cloudflare çerezlerini topluyoruz
-            session_client.get("https://metin2alerts.com/", headers=BROWSER_HEADERS, timeout=15)
-        except Exception as e:
-            print(f"Session başlatma uyarısı: {e}", flush=True)
-    return session_client
-
 def fetch_data(urun_adi):
     arama_kelimesi = urun_adi.split("+")[0].strip() if "+" in urun_adi else urun_adi
     if "(" in arama_kelimesi:
         arama_kelimesi = arama_kelimesi.split("(")[0].strip()
 
-    payload = {
-        "server": SERVER_NAME,
-        "search": arama_kelimesi,
-        "query": arama_kelimesi
-    }
+    target_url = f"{API_URL}?server={SERVER_NAME}&query={arama_kelimesi}&search={arama_kelimesi}"
 
-    client = get_session()
-    if client:
-        # 1. Deneme: POST isteği (Next.js pazar API standardı)
+    # ScraperAPI anahtarı varsa Cloudflare korumasını delerek istek atar
+    if SCRAPER_API_KEY:
+        scraper_url = "http://api.scraperapi.com"
+        params = {
+            "api_key": SCRAPER_API_KEY,
+            "url": target_url,
+            "keep_headers": "true"
+        }
         try:
-            r = client.post(API_URL, json=payload, headers=BROWSER_HEADERS, timeout=15)
-            if r.status_code == 200:
-                return r.json()
-            elif r.status_code != 404:
-                print(f"⚠️ [{urun_adi}] POST HTTP {r.status_code}", flush=True)
-        except Exception:
-            pass
-
-        # 2. Deneme: GET isteği (Fallback)
-        try:
-            r = client.get(API_URL, params=payload, headers=BROWSER_HEADERS, timeout=15)
+            r = requests.get(scraper_url, params=params, timeout=35)
             if r.status_code == 200:
                 return r.json()
             else:
-                print(f"⚠️ [{urun_adi}] GET HTTP {r.status_code}", flush=True)
+                print(f"⚠️ [{urun_adi}] ScraperAPI HTTP {r.status_code}: {r.text[:100]}", flush=True)
         except Exception as e:
-            print(f"⚠️ [{urun_adi}] İstek Hatası: {e}", flush=True)
+            print(f"⚠️ [{urun_adi}] ScraperAPI Hatası: {e}", flush=True)
+        return None
 
+    # ScraperAPI anahtarı henüz eklenmemişse standart istek atar
+    try:
+        r = requests.get(target_url, timeout=15)
+        if r.status_code == 200:
+            return r.json()
+    except Exception:
+        pass
     return None
 
 def efsun_uyuyor_mu(istenen_sart, tum_efsunlar):
@@ -328,6 +296,12 @@ def pazar_tarama_dongusu():
                     continue
 
                 items = data if isinstance(data, list) else (data.get("items") or data.get("data") or data.get("results") or [])
+
+                if len(items) == 0:
+                    print(f"ℹ️ [{hedef['isim']}] Pazarda aktif ilan yok (0 adet).", flush=True)
+                    time.sleep(2)
+                    continue
+
                 kriter_uydu_sayisi = 0
 
                 for item in items:
