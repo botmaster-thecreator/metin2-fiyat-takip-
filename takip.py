@@ -62,25 +62,30 @@ def send_telegram(text):
 
 def gemini_ile_cozumle(kullanici_metni):
     if not GEMINI_API_KEY:
-        print("GEMINI_API_KEY bulunamadı.")
-        return []
+        return None
 
     prompt = f"""
-    Sen bir Metin2 oyun pazar asistanısın. Kullanıcı serbest Türkçe metinle oyunda aramak istediği eşyaları anlatıyor.
-    Metni analiz et ve Metin2 pazarında birebir aratılabilecek tam eşya isimlerini, artı seviyesini (+0'dan +9'a kadar), won bütçesini ve aranan efsunları belirle.
+    Sen bir Metin2 oyun pazar asistanısın. Kullanıcının Türkçe yazdığı mesajı analiz et ve niyetini JSON olarak çıkar.
 
-    Kurallar:
-    1. Kullanıcı genel veya sınıf odaklı konuştuysa (örn: "sura için 15 ateş direnci kask ve zırh bakıyorum 50 won"), o sınıfa ait popüler ilgili eşyaların tam adlarını türet (örn: "Boynuzlu Kask +9", "Kale Kask +9", "Kara Büyü Zırh +9").
-    2. Artı belirtilmemiş ama kask, zırh, silah gibi artı basılan bir şey isteniyorsa varsayılan olarak "+9" kabul et.
-    3. Fiyat belirtilmemişse max_won değerine 9999 yaz.
-    4. Efsun filtresine efsunun sayısal değeriyle birlikte sade anahtar kelimesini ekle (örn: "15 ateş", "2000 hp", "10 rüzgar").
-    5. Çıktı SADECE ve kesinlikle JSON formatında bir liste olmalıdır. Hiçbir açıklama yazma.
+    Niyetler:
+    1. "son_sil": Kullanıcı en son eklenen eşyaları geri almak / silmek istiyorsa (Örn: "en son eklediklerini sil", "az öncekileri çıkar", "son işlemi iptal et").
+    2. "sil": Kullanıcı belirli bir eşyayı veya kategoriyi silmek istiyorsa (Örn: "kaskları sil", "kara büyüyü kaldır"). "silinecekler" listesine aranacak kelimeleri ekle.
+    3. "temizle": Kullanıcı tüm listeyi sıfırlamak istiyorsa (Örn: "bütün listeyi sil", "her şeyi temizle").
+    4. "ekle": Kullanıcı pazarda aranacak yeni eşyalar tanımlıyorsa.
 
-    JSON Örnek Formatı:
-    [
-      {{"isim": "Kara Büyü Zırh +9", "max_won": 50.0, "efsunlar": ["15 ateş"]}},
-      {{"isim": "Boynuzlu Kask +9", "max_won": 50.0, "efsunlar": ["15 ateş"]}}
-    ]
+    Ekleme Kuralları:
+    - Sınıf odaklı isteklerde (örn: "sura için 15 ateş zırh") popüler eşya tam isimlerini türet ("Kara Büyü Zırh +9" gibi).
+    - Artı belirtilmemişse varsayılan "+9" yap. Fiyat yoksa max_won: 9999 ver.
+    - Efsunları sayısal değer ve sade haliyle diziye ekle ("15 ateş", "2000 hp").
+
+    Çıktı SADECE geçerli bir JSON nesnesi olmalıdır:
+    {{
+      "aksiyon": "ekle" | "son_sil" | "sil" | "temizle",
+      "silinecekler": ["kelime1", "kelime2"],
+      "esyalar": [
+        {{"isim": "Kara Büyü Zırh +9", "max_won": 50.0, "efsunlar": ["15 ateş"]}}
+      ]
+    }}
 
     Kullanıcı İsteği: "{kullanici_metni}"
     """
@@ -88,9 +93,7 @@ def gemini_ile_cozumle(kullanici_metni):
     url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={GEMINI_API_KEY}"
     payload = {
         "contents": [{"parts": [{"text": prompt}]}],
-        "generationConfig": {
-            "response_mime_type": "application/json"
-        }
+        "generationConfig": {"response_mime_type": "application/json"}
     }
 
     try:
@@ -100,14 +103,15 @@ def gemini_ile_cozumle(kullanici_metni):
         return json.loads(raw_json)
     except Exception as e:
         print(f"Gemini Çözümleme Hatası: {e}")
-        return []
+        return None
 
 def komutlari_isle(takip_listesi):
     if not TELEGRAM_TOKEN:
         return takip_listesi
 
-    state = load_json(STATE_FILE, {"last_update_id": 0})
+    state = load_json(STATE_FILE, {"last_update_id": 0, "son_eklenenler": []})
     last_id = state.get("last_update_id", 0)
+    son_eklenenler = state.get("son_eklenenler", [])
     
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/getUpdates?offset={last_id + 1}"
     try:
@@ -131,19 +135,8 @@ def komutlari_isle(takip_listesi):
             if sender_id != CHAT_ID or not text:
                 continue
 
-            # 1. Silme Komutu
-            if text.startswith("/sil"):
-                hedef = text.replace("/sil", "").strip().lower()
-                yeni_liste = [item for item in takip_listesi if hedef not in item["isim"].lower()]
-                if len(yeni_liste) != len(takip_listesi):
-                    takip_listesi = yeni_liste
-                    degisiklik_var = True
-                    send_telegram(f"🗑️ '{hedef}' içeren eşyalar listeden temizlendi.")
-                else:
-                    send_telegram(f"⚠️ <b>{hedef}</b> takip listesinde bulunamadı.")
-
-            # 2. Liste Komutu
-            elif text in ["/liste", "/start"]:
+            # Klasik komut: /liste veya /start
+            if text in ["/liste", "/start"]:
                 if not takip_listesi:
                     send_telegram("📋 Takip listeniz şu an boş.\n\nİstediğin eşyayı günlük dille yazabilirsin (Örn: <i>Sura 15 ateş kask ve zırh 40 won</i>).")
                 else:
@@ -153,27 +146,80 @@ def komutlari_isle(takip_listesi):
                         efs_metin = f" <i>(Efsun: {', '.join(efs)})</i>" if efs else ""
                         metin += f"• <b>{itm['isim']}</b> ➔ Maks: {itm['max_won']} Won{efs_metin}\n"
                     send_telegram(metin)
+                continue
 
-            # 3. Serbest Metin / Doğal Dil Algılama
-            else:
-                send_telegram("🧠 İsteğin yapay zekâ ile çözümleniyor...")
-                yeni_esyalar = gemini_ile_cozumle(text)
+            # Doğal Dil / Gemini Analizi
+            send_telegram("🧠 İsteğin analiz ediliyor...")
+            analiz = gemini_ile_cozumle(text)
 
+            if not analiz:
+                send_telegram("⚠️ İsteğin anlaşılamadı. Lütfen tekrar dene.")
+                continue
+
+            aksiyon = analiz.get("aksiyon")
+
+            # 1. En Son Eklenenleri Silme
+            if aksiyon == "son_sil":
+                if not son_eklenenler:
+                    send_telegram("⚠️ Hafızada geri alınabilecek son eklenmiş bir eşya kaydı bulunamadı.")
+                else:
+                    silinen_isimler = [ad.lower() for ad in son_eklenenler]
+                    eski_boyut = len(takip_listesi)
+                    takip_listesi = [itm for itm in takip_listesi if itm["isim"].lower() not in silinen_isimler]
+                    
+                    if len(takip_listesi) < eski_boyut:
+                        send_telegram(f"🗑️ <b>Son eklenenler listeden kaldırıldı:</b>\n• " + "\n• ".join(son_eklenenler))
+                        son_eklenenler = []
+                        degisiklik_var = True
+                    else:
+                        send_telegram("⚠️ Son eklenen eşyalar zaten listede bulunamadı.")
+
+            # 2. Belirli Bir İsim/Kategori Silme
+            elif aksiyon == "sil":
+                silinecekler = [s.lower() for s in analiz.get("silinecekler", [])]
+                if not silinecekler:
+                    send_telegram("⚠️ Hangi eşyayı silmek istediğin tam anlaşılamadı.")
+                else:
+                    eski_boyut = len(takip_listesi)
+                    takip_listesi = [
+                        itm for itm in takip_listesi 
+                        if not any(hedef in itm["isim"].lower() for hedef in silinecekler)
+                    ]
+                    if len(takip_listesi) < eski_boyut:
+                        send_telegram(f"🗑️ <b>Listeden temizlendi:</b> {', '.join(silinecekler)}")
+                        degisiklik_var = True
+                    else:
+                        send_telegram(f"⚠️ '{', '.join(silinecekler)}' ile eşleşen bir eşya bulunamadı.")
+
+            # 3. Tüm Listeyi Sıfırlama
+            elif aksiyon == "temizle":
+                takip_listesi = []
+                son_eklenenler = []
+                degisiklik_var = True
+                send_telegram("🧹 <b>Takip listen tamamen temizlendi!</b>")
+
+            # 4. Yeni Eşya Ekleme
+            elif aksiyon == "ekle":
+                yeni_esyalar = analiz.get("esyalar", [])
                 if yeni_esyalar:
                     eklenen_isimler = []
+                    yeni_eklenen_adlar = []
                     for y_item in yeni_esyalar:
-                        # Varsa eskilerini temizle
+                        # Varsa eskilerini ez
                         takip_listesi = [item for item in takip_listesi if item["isim"].lower() != y_item["isim"].lower()]
                         takip_listesi.append(y_item)
+                        yeni_eklenen_adlar.append(y_item["isim"])
                         efs = f" [{', '.join(y_item.get('efsunlar', []))}]" if y_item.get('efsunlar') else ""
                         eklenen_isimler.append(f"• <b>{y_item['isim']}</b> (Tavan: {y_item['max_won']} Won){efs}")
                     
+                    son_eklenenler = yeni_eklenen_adlar
                     degisiklik_var = True
-                    send_telegram("✅ <b>Aşağıdaki eşyalar listeye eklendi:</b>\n\n" + "\n".join(eklenen_isimler))
+                    send_telegram("✅ <b>Listeye eklendi:</b>\n\n" + "\n".join(eklenen_isimler))
                 else:
-                    send_telegram("⚠️ İsteğin anlaşılamadı veya eşya bulunamadı. Lütfen biraz daha açık yazmayı dene.")
+                    send_telegram("⚠️ Eklenecek eşya tespit edilemedi.")
 
         state["last_update_id"] = last_id
+        state["son_eklenenler"] = son_eklenenler
         save_json(STATE_FILE, state)
         if degisiklik_var:
             save_json(LISTE_FILE, takip_listesi)
