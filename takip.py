@@ -16,6 +16,7 @@ SERVER_NAME = "Charon"
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "").strip()
 CHAT_ID = os.environ.get("CHAT_ID", "").strip()
 API_URL = os.environ.get("API_URL", "").strip()
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "").strip()
 
 DB_FILE = "bildirilenler.json"
 LISTE_FILE = "takip_listesi.json"
@@ -59,6 +60,48 @@ def send_telegram(text):
     except Exception as e:
         print(f"Telegram İstek Hatası: {e}")
 
+def gemini_ile_cozumle(kullanici_metni):
+    if not GEMINI_API_KEY:
+        print("GEMINI_API_KEY bulunamadı.")
+        return []
+
+    prompt = f"""
+    Sen bir Metin2 oyun pazar asistanısın. Kullanıcı serbest Türkçe metinle oyunda aramak istediği eşyaları anlatıyor.
+    Metni analiz et ve Metin2 pazarında birebir aratılabilecek tam eşya isimlerini, artı seviyesini (+0'dan +9'a kadar), won bütçesini ve aranan efsunları belirle.
+
+    Kurallar:
+    1. Kullanıcı genel veya sınıf odaklı konuştuysa (örn: "sura için 15 ateş direnci kask ve zırh bakıyorum 50 won"), o sınıfa ait popüler ilgili eşyaların tam adlarını türet (örn: "Boynuzlu Kask +9", "Kale Kask +9", "Kara Büyü Zırh +9").
+    2. Artı belirtilmemiş ama kask, zırh, silah gibi artı basılan bir şey isteniyorsa varsayılan olarak "+9" kabul et.
+    3. Fiyat belirtilmemişse max_won değerine 9999 yaz.
+    4. Efsun filtresine efsunun sayısal değeriyle birlikte sade anahtar kelimesini ekle (örn: "15 ateş", "2000 hp", "10 rüzgar").
+    5. Çıktı SADECE ve kesinlikle JSON formatında bir liste olmalıdır. Hiçbir açıklama yazma.
+
+    JSON Örnek Formatı:
+    [
+      {{"isim": "Kara Büyü Zırh +9", "max_won": 50.0, "efsunlar": ["15 ateş"]}},
+      {{"isim": "Boynuzlu Kask +9", "max_won": 50.0, "efsunlar": ["15 ateş"]}}
+    ]
+
+    Kullanıcı İsteği: "{kullanici_metni}"
+    """
+
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={GEMINI_API_KEY}"
+    payload = {
+        "contents": [{"parts": [{"text": prompt}]}],
+        "generationConfig": {
+            "response_mime_type": "application/json"
+        }
+    }
+
+    try:
+        res = requests.post(url, json=payload, timeout=20)
+        data = res.json()
+        raw_json = data["candidates"][0]["content"]["parts"][0]["text"]
+        return json.loads(raw_json)
+    except Exception as e:
+        print(f"Gemini Çözümleme Hatası: {e}")
+        return []
+
 def komutlari_isle(takip_listesi):
     if not TELEGRAM_TOKEN:
         return takip_listesi
@@ -88,58 +131,47 @@ def komutlari_isle(takip_listesi):
             if sender_id != CHAT_ID or not text:
                 continue
 
-            if text.startswith("/ekle"):
-                # Örnek 1: /ekle Zehir Kılıcı +9 50
-                # Örnek 2: /ekle Zehir Kılıcı +9 80 | ortalama
-                # Örnek 3: /ekle Siyah Çelik Zırh +9 40 | hp, kılıç
-                text_clean = text.replace("/ekle", "", 1).strip()
-                efsunlar = []
-
-                if "|" in text_clean:
-                    item_kismi, efsun_kismi = text_clean.split("|", 1)
-                    efsunlar = [e.strip().lower() for e in efsun_kismi.split(",") if e.strip()]
-                else:
-                    item_kismi = text_clean
-
-                parcalar = item_kismi.strip().rsplit(" ", 1)
-                if len(parcalar) == 2 and parcalar[1].replace(".", "", 1).isdigit():
-                    isim = parcalar[0].strip()
-                    fiyat = float(parcalar[1])
-                    
-                    # Varsa eski kaydı temizle
-                    takip_listesi = [item for item in takip_listesi if item["isim"].lower() != isim.lower()]
-                    takip_listesi.append({
-                        "isim": isim,
-                        "max_won": fiyat,
-                        "efsunlar": efsunlar
-                    })
-                    degisiklik_var = True
-                    efsun_notu = f"\n🎯 <b>Aranan Efsunlar:</b> {', '.join(efsunlar)}" if efsunlar else ""
-                    send_telegram(f"✅ <b>Listeye Eklendi:</b> {isim}\n💰 <b>Tavan:</b> {fiyat} Won{efsun_notu}")
-                else:
-                    send_telegram("⚠️ <b>Hatalı format!</b>\nÖrnek: <code>/ekle Dolunay Kılıcı +9 15</code>\nEfsunlu: <code>/ekle Zehir Kılıcı +9 80 | ortalama</code>")
-
-            elif text.startswith("/sil"):
-                isim = text.replace("/sil", "").strip()
-                yeni_liste = [item for item in takip_listesi if item["isim"].lower() != isim.lower()]
+            # 1. Silme Komutu
+            if text.startswith("/sil"):
+                hedef = text.replace("/sil", "").strip().lower()
+                yeni_liste = [item for item in takip_listesi if hedef not in item["isim"].lower()]
                 if len(yeni_liste) != len(takip_listesi):
                     takip_listesi = yeni_liste
                     degisiklik_var = True
-                    send_telegram(f"🗑️ <b>Listeden Silindi:</b> {isim}")
+                    send_telegram(f"🗑️ '{hedef}' içeren eşyalar listeden temizlendi.")
                 else:
-                    send_telegram(f"⚠️ <b>{isim}</b> takip listesinde bulunamadı.")
+                    send_telegram(f"⚠️ <b>{hedef}</b> takip listesinde bulunamadı.")
 
-            elif text == "/liste" or text == "/start":
+            # 2. Liste Komutu
+            elif text in ["/liste", "/start"]:
                 if not takip_listesi:
-                    send_telegram("📋 Takip listeniz şu an boş.")
+                    send_telegram("📋 Takip listeniz şu an boş.\n\nİstediğin eşyayı günlük dille yazabilirsin (Örn: <i>Sura 15 ateş kask ve zırh 40 won</i>).")
                 else:
                     metin = "📋 <b>Aktif Takip Listesi (Charon):</b>\n\n"
                     for itm in takip_listesi:
                         efs = itm.get("efsunlar", [])
-                        efs_metin = f" <i>(Filtre: {', '.join(efs)})</i>" if efs else ""
+                        efs_metin = f" <i>(Efsun: {', '.join(efs)})</i>" if efs else ""
                         metin += f"• <b>{itm['isim']}</b> ➔ Maks: {itm['max_won']} Won{efs_metin}\n"
-                    metin += "\n<i>Yeni ekleme: /ekle İsim +9 Fiyat | efsun1, efsun2</i>"
                     send_telegram(metin)
+
+            # 3. Serbest Metin / Doğal Dil Algılama
+            else:
+                send_telegram("🧠 İsteğin yapay zekâ ile çözümleniyor...")
+                yeni_esyalar = gemini_ile_cozumle(text)
+
+                if yeni_esyalar:
+                    eklenen_isimler = []
+                    for y_item in yeni_esyalar:
+                        # Varsa eskilerini temizle
+                        takip_listesi = [item for item in takip_listesi if item["isim"].lower() != y_item["isim"].lower()]
+                        takip_listesi.append(y_item)
+                        efs = f" [{', '.join(y_item.get('efsunlar', []))}]" if y_item.get('efsunlar') else ""
+                        eklenen_isimler.append(f"• <b>{y_item['isim']}</b> (Tavan: {y_item['max_won']} Won){efs}")
+                    
+                    degisiklik_var = True
+                    send_telegram("✅ <b>Aşağıdaki eşyalar listeye eklendi:</b>\n\n" + "\n".join(eklenen_isimler))
+                else:
+                    send_telegram("⚠️ İsteğin anlaşılamadı veya eşya bulunamadı. Lütfen biraz daha açık yazmayı dene.")
 
         state["last_update_id"] = last_id
         save_json(STATE_FILE, state)
@@ -152,9 +184,7 @@ def komutlari_isle(takip_listesi):
     return takip_listesi
 
 def fetch_data(urun_adi):
-    # Aramayı sade isimle yapar (pazar API'si tam artı derecesiyle aramalarda sonuç döndürmezse diye ana adı baz alır)
     arama_kelimesi = urun_adi.split("+")[0].strip() if "+" in urun_adi else urun_adi
-    # Parantez içi cinsiyet varsa kaldırıp aratır (örn: "Kostüm (E)" -> "Kostüm")
     if "(" in arama_kelimesi:
         arama_kelimesi = arama_kelimesi.split("(")[0].strip()
 
@@ -174,6 +204,14 @@ def fetch_data(urun_adi):
     except Exception as e:
         print(f"İstek Hatası: {e}")
     return None
+
+def efsun_uyuyor_mu(istenen_sart, tum_efsunlar):
+    aranan_kelimeler = istenen_sart.split()
+    for satır in tum_efsunlar:
+        satır_lower = str(satır).lower()
+        if all(kelime in satır_lower for kelime in aranan_kelimeler):
+            return True
+    return False
 
 def main():
     varsayilan_liste = [
@@ -207,21 +245,21 @@ def main():
             bonuses = item.get("bonuses", item.get("efsunlar", []))
             seller = item.get("seller", item.get("player_name", "Bilinmiyor"))
 
-            # 1. İsim ve Artı/Cinsiyet Kontrolü
             if aranan_tam_ad not in name.lower():
                 continue
 
-            # 2. Fiyat Kontrolü
             if price > limit_won:
                 continue
 
-            # 3. Efsun Kontrolü (Varsa tüm istenen kelimeler efsunlarda geçmeli)
             if istenen_efsunlar:
-                tum_efsun_metni = " ".join([str(b) for b in bonuses]).lower()
-                if not all(efsun in tum_efsun_metni for efsun in istenen_efsunlar):
+                uygun = True
+                for sart in istenen_efsunlar:
+                    if not efsun_uyuyor_mu(sart, bonuses):
+                        uygun = False
+                        break
+                if not uygun:
                     continue
 
-            # Daha önce bildirildiyse atla
             if item_id in seen_ids:
                 continue
 
