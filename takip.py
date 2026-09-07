@@ -34,7 +34,7 @@ HEADERS = {
 lock = threading.Lock()
 
 # -------------------------------------------------------------
-# 🌐 FLASK WEB SUNUCUSU (Render'ı Canlı Tutmak İçin)
+# 🌐 FLASK WEB SUNUCUSU (Render Canlı Tutma)
 # -------------------------------------------------------------
 app = Flask(__name__)
 
@@ -141,7 +141,7 @@ def liste_mesaji_gonder(takip_listesi):
         send_telegram(metin)
 
 # -------------------------------------------------------------
-# ⚡ ANLIK TELEGRAM DİNLEYİCİSİ (LONG-POLLING)
+# ⚡ ANLIK TELEGRAM DİNLEYİCİSİ
 # -------------------------------------------------------------
 def telegram_dinleyici_dongusu():
     print("Telegram anlık dinleme başlatıldı...", flush=True)
@@ -173,8 +173,7 @@ def telegram_dinleyici_dongusu():
 
                 with lock:
                     takip_listesi = load_json(LISTE_FILE, [
-                        {"isim": "Zehir Kılıcı +9", "max_won": 50, "efsunlar": []},
-                        {"isim": "Kin Kılıcı +9", "max_won": 30, "efsunlar": []}
+                        {"isim": "Zehir Kılıcı +9", "max_won": 50, "efsunlar": []}
                     ])
                     son_eklenenler = state.get("son_eklenenler", [])
                     degisiklik_var = False
@@ -269,7 +268,7 @@ def telegram_dinleyici_dongusu():
             time.sleep(3)
 
 # -------------------------------------------------------------
-# 🔍 METIN2 PAZAR TARAYICISI (CANLI LOG DESTEKLİ)
+# 🔍 METIN2 PAZAR TARAYICISI (GELİŞMİŞ LOG DESTEKLİ)
 # -------------------------------------------------------------
 def fetch_data(urun_adi):
     arama_kelimesi = urun_adi.split("+")[0].strip() if "+" in urun_adi else urun_adi
@@ -277,20 +276,26 @@ def fetch_data(urun_adi):
         arama_kelimesi = arama_kelimesi.split("(")[0].strip()
 
     params = {"server": SERVER_NAME, "query": arama_kelimesi}
+
     if HAS_CURL:
         try:
             r = cureq.get(API_URL, params=params, headers=HEADERS, impersonate="chrome120", timeout=15)
             if r.status_code == 200:
                 return r.json()
-        except Exception:
-            pass
-            
+            else:
+                print(f"⚠️ [{urun_adi}] curl_cffi HTTP Hatası: {r.status_code}", flush=True)
+        except Exception as e:
+            print(f"⚠️ [{urun_adi}] curl_cffi İstek Hatası: {e}", flush=True)
+
     try:
         r = requests.get(API_URL, params=params, headers=HEADERS, timeout=15)
         if r.status_code == 200:
             return r.json()
+        else:
+            print(f"⚠️ [{urun_adi}] requests HTTP Hatası: {r.status_code}", flush=True)
     except Exception as e:
-        print(f"İstek Hatası: {e}", flush=True)
+        print(f"⚠️ [{urun_adi}] requests İstek Hatası: {e}", flush=True)
+
     return None
 
 def efsun_uyuyor_mu(istenen_sart, tum_efsunlar):
@@ -310,7 +315,7 @@ def pazar_tarama_dongusu():
                 seen_ids = set(load_json(DB_FILE, []))
 
             zaman_str = time.strftime('%H:%M:%S')
-            print(f"\n--- [{zaman_str}] Pazar Taraması Başladı ({len(takip_listesi)} Eşya Takipte) ---", flush=True)
+            print(f"\n--- [{zaman_str}] Pazar Taraması Başladı ({len(takip_listesi)} Eşya) ---", flush=True)
             yeni_bildirim_sayisi = 0
 
             for hedef in takip_listesi:
@@ -319,12 +324,21 @@ def pazar_tarama_dongusu():
                 istenen_efsunlar = hedef.get("efsunlar", [])
 
                 data = fetch_data(hedef["isim"])
-                if not data:
-                    print(f"⚠️ [{hedef['isim']}] API yanıt vermedi veya ilan listelenmedi.", flush=True)
+                
+                # API tamamen erişilmezse
+                if data is None:
+                    print(f"❌ [{hedef['isim']}] API verisi alınamadı (Bağlantı engeli/hatası).", flush=True)
                     time.sleep(2)
                     continue
 
                 items = data if isinstance(data, list) else (data.get("items") or data.get("data") or data.get("results") or [])
+
+                # Pazarda bu isimle hiç ilan yoksa
+                if len(items) == 0:
+                    print(f"ℹ️ [{hedef['isim']}] Pazarda bu isimle aktif ilan yok (0 adet).", flush=True)
+                    time.sleep(2)
+                    continue
+
                 kriter_uydu_sayisi = 0
 
                 for item in items:
@@ -371,13 +385,13 @@ def pazar_tarama_dongusu():
                     yeni_bildirim_sayisi += 1
                     time.sleep(1)
 
-                print(f"📊 [{hedef['isim']}] Pazardan çekilen: {len(items)} | Kriterlere uyan: {kriter_uydu_sayisi}", flush=True)
+                print(f"📊 [{hedef['isim']}] Pazardaki Toplam: {len(items)} | Kriterlere Uyan: {kriter_uydu_sayisi}", flush=True)
                 time.sleep(2)
 
             with lock:
                 save_json(DB_FILE, list(seen_ids))
 
-            print(f"✅ Tarama bitti. {yeni_bildirim_sayisi} yeni ilan bildirildi. Bir sonraki tarama 5 dk sonra.\n", flush=True)
+            print(f"✅ Tarama bitti. {yeni_bildirim_sayisi} yeni ilan bildirildi. 5 dk sonra tekrar taranacak.\n", flush=True)
 
         except Exception as e:
             print(f"Pazar Tarama Hatası: {e}", flush=True)
