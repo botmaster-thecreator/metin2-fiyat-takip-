@@ -63,7 +63,7 @@ def save_json(dosya, veri):
         with open(dosya, "w", encoding="utf-8") as f:
             json.dump(veri, f, ensure_ascii=False, indent=2)
     except Exception as e:
-        print(f"Kayıt Hatası ({dosya}): {e}")
+        print(f"Kayıt Hatası ({dosya}): {e}", flush=True)
 
 def send_telegram(text):
     if not TELEGRAM_TOKEN or not CHAT_ID:
@@ -78,7 +78,7 @@ def send_telegram(text):
     try:
         requests.post(url, json=payload, timeout=10)
     except Exception as e:
-        print(f"Telegram Gönderim Hatası: {e}")
+        print(f"Telegram Gönderim Hatası: {e}", flush=True)
 
 # -------------------------------------------------------------
 # 🧠 GEMINI DOĞAL DİL ANALİZİ
@@ -126,7 +126,7 @@ def gemini_ile_cozumle(kullanici_metni):
         raw_json = data["candidates"][0]["content"]["parts"][0]["text"]
         return json.loads(raw_json)
     except Exception as e:
-        print(f"Gemini Çözümleme Hatası: {e}")
+        print(f"Gemini Çözümleme Hatası: {e}", flush=True)
         return None
 
 def liste_mesaji_gonder(takip_listesi):
@@ -144,7 +144,7 @@ def liste_mesaji_gonder(takip_listesi):
 # ⚡ ANLIK TELEGRAM DİNLEYİCİSİ (LONG-POLLING)
 # -------------------------------------------------------------
 def telegram_dinleyici_dongusu():
-    print("Telegram anlık dinleme başlatıldı...")
+    print("Telegram anlık dinleme başlatıldı...", flush=True)
     state = load_json(STATE_FILE, {"last_update_id": 0, "son_eklenenler": []})
     last_id = state.get("last_update_id", 0)
 
@@ -265,11 +265,11 @@ def telegram_dinleyici_dongusu():
                         save_json(LISTE_FILE, takip_listesi)
 
         except Exception as e:
-            print(f"Telegram Dinleme Hatası: {e}")
+            print(f"Telegram Dinleme Hatası: {e}", flush=True)
             time.sleep(3)
 
 # -------------------------------------------------------------
-# 🔍 METIN2 PAZAR TARAYICISI (5 DAKİKADA BİR)
+# 🔍 METIN2 PAZAR TARAYICISI (CANLI LOG DESTEKLİ)
 # -------------------------------------------------------------
 def fetch_data(urun_adi):
     arama_kelimesi = urun_adi.split("+")[0].strip() if "+" in urun_adi else urun_adi
@@ -290,7 +290,7 @@ def fetch_data(urun_adi):
         if r.status_code == 200:
             return r.json()
     except Exception as e:
-        print(f"İstek Hatası: {e}")
+        print(f"İstek Hatası: {e}", flush=True)
     return None
 
 def efsun_uyuyor_mu(istenen_sart, tum_efsunlar):
@@ -302,12 +302,16 @@ def efsun_uyuyor_mu(istenen_sart, tum_efsunlar):
     return False
 
 def pazar_tarama_dongusu():
-    print(f"[{SERVER_NAME}] Pazar tarama servisi başlatıldı...")
+    print(f"[{SERVER_NAME}] Pazar tarama servisi aktif.", flush=True)
     while True:
         try:
             with lock:
                 takip_listesi = load_json(LISTE_FILE, [])
                 seen_ids = set(load_json(DB_FILE, []))
+
+            zaman_str = time.strftime('%H:%M:%S')
+            print(f"\n--- [{zaman_str}] Pazar Taraması Başladı ({len(takip_listesi)} Eşya Takipte) ---", flush=True)
+            yeni_bildirim_sayisi = 0
 
             for hedef in takip_listesi:
                 aranan_tam_ad = hedef["isim"].lower()
@@ -316,10 +320,12 @@ def pazar_tarama_dongusu():
 
                 data = fetch_data(hedef["isim"])
                 if not data:
+                    print(f"⚠️ [{hedef['isim']}] API yanıt vermedi veya ilan listelenmedi.", flush=True)
                     time.sleep(2)
                     continue
 
                 items = data if isinstance(data, list) else (data.get("items") or data.get("data") or data.get("results") or [])
+                kriter_uydu_sayisi = 0
 
                 for item in items:
                     item_id = str(item.get("id") or item.get("_id") or item.get("hash") or f"{item.get('name')}_{item.get('price_won')}")
@@ -342,6 +348,8 @@ def pazar_tarama_dongusu():
                         if not uygun:
                             continue
 
+                    kriter_uydu_sayisi += 1
+
                     if item_id in seen_ids:
                         continue
 
@@ -360,15 +368,19 @@ def pazar_tarama_dongusu():
 
                     send_telegram(mesaj)
                     seen_ids.add(item_id)
+                    yeni_bildirim_sayisi += 1
                     time.sleep(1)
 
+                print(f"📊 [{hedef['isim']}] Pazardan çekilen: {len(items)} | Kriterlere uyan: {kriter_uydu_sayisi}", flush=True)
                 time.sleep(2)
 
             with lock:
                 save_json(DB_FILE, list(seen_ids))
 
+            print(f"✅ Tarama bitti. {yeni_bildirim_sayisi} yeni ilan bildirildi. Bir sonraki tarama 5 dk sonra.\n", flush=True)
+
         except Exception as e:
-            print(f"Pazar Tarama Hatası: {e}")
+            print(f"Pazar Tarama Hatası: {e}", flush=True)
 
         time.sleep(300)
 
